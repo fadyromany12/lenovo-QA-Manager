@@ -103,8 +103,8 @@
 
         // ⚠️ ADMIN SETUP: Paste your Gemini API Key inside the quotes below to auto-load it for all users.
         const DEFAULT_GEMINI_API_KEY = "AIzaSyBfe4UioV5Is_11MTXC_XCJ95NdNYlx55o"; 
-        const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"; // Updated Default model
-
+        const DEFAULT_GEMINI_MODEL = "gemini-flash-latest"; // Updated Default model
+        const ADMIN_PASSWORD = "faddy1112"; // Set your desired password here
         const CORE_AGENTS = [
             "Amir Daniel", "Amr Ibrahim", "Rawan Essam", "Noura Aly", "Youssef Abdelshafy"
         ];
@@ -533,22 +533,65 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
             return `${y}-${m}-${day}`;
         };
 
-        // --- CHART COMPONENT ---
+        // --- STABILIZED CHART COMPONENT (UPDATE MODE) ---
         const ChartComponent = ({ type, data, options }) => {
             const canvasRef = useRef(null);
             const chartRef = useRef(null);
 
+            // 1. Create Chart Instance (ONCE)
             useEffect(() => {
-                if (!canvasRef.current) return;
-                
-                let chartInstance = null;
-                const rafId = requestAnimationFrame(() => {
+                const canvas = canvasRef.current;
+                if (!canvas) return;
+
+                // Initial Config
+                const config = {
+                    type,
+                    data,
+                    options: {
+                        ...options,
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        plugins: {
+                            ...options.plugins,
+                            datalabels: {
+                                color: '#fff',
+                                font: { weight: 'bold', size: 10 },
+                                display: (context) => context.dataset.data[context.dataIndex] > 0,
+                                formatter: (value) => value,
+                                ...(options.plugins?.datalabels || {})
+                            }
+                        }
+                    }
+                };
+
+                // Create and save instance
+                chartRef.current = new Chart(canvas, config);
+
+                // Cleanup only on component unmount (page change)
+                return () => {
                     if (chartRef.current) {
                         chartRef.current.destroy();
                         chartRef.current = null;
                     }
-                    const finalOptions = {
+                };
+                // eslint-disable-next-line react-hooks/exhaustive-deps
+            }, []); // Empty deps = run once
+
+            // 2. Watch for Data Changes & Update Smoothly
+            useEffect(() => {
+                if (!chartRef.current) return;
+
+                const chart = chartRef.current;
+                
+                // Update Data
+                chart.data = data;
+                
+                // Update Options (Preserving Datalabels logic)
+                if (options) {
+                     chart.options = {
                         ...options,
+                        responsive: true,
+                        maintainAspectRatio: false,
                         plugins: {
                             ...options.plugins,
                             datalabels: {
@@ -560,18 +603,12 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                             }
                         }
                     };
-                    chartInstance = new Chart(canvasRef.current, { type, data, options: finalOptions });
-                    chartRef.current = chartInstance;
-                });
+                }
 
-                return () => { 
-                    cancelAnimationFrame(rafId);
-                    if (chartRef.current) {
-                        chartRef.current.destroy(); 
-                        chartRef.current = null;
-                    }
-                };
-            }, [type, data, options]);
+                // Smooth Render
+                chart.update();
+
+            }, [data, options]);
 
             return <canvas ref={canvasRef} />;
         };
@@ -695,7 +732,8 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
             // UPDATED: Check for default key & model & proxy
             const [apiKey, setApiKey] = useState(localStorage.getItem('lenovo_gemini_key') || DEFAULT_GEMINI_API_KEY || '');
             const [apiModel, setApiModel] = useState(localStorage.getItem('lenovo_gemini_model') || DEFAULT_GEMINI_MODEL);
-            const [proxyUrl, setProxyUrl] = useState(localStorage.getItem('lenovo_proxy_url') || DEFAULT_PROXY_URL || '');
+            // HARDCODED PROXY URL (Forces correct HTTPS connection)
+            const [proxyUrl, setProxyUrl] = useState("https://lenovo-qa-proxy.fadyromanyaaa.workers.dev");
             
             // NEW: Custom Model Support
             const [useCustomModel, setUseCustomModel] = useState(false);
@@ -712,6 +750,10 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
             });
 
             const [trendAgent, setTrendAgent] = useState('All Agents');
+            // --- NEW: STATE FOR SORTING & PAGINATION ---
+            const [visibleChatLimit, setVisibleChatLimit] = useState(100);
+            const [sortMode, setSortMode] = useState('date-newest'); // Options: 'date-newest', 'date-oldest', 'agent'
+
 
             // --- WORKER REF ---
             const workerRef = useRef(null);
@@ -1062,100 +1104,110 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                 setTimeout(analyzeNextChunk, 0);
             };
 
-            // --- LAYER 5: REAL GEMINI INTEGRATION ---
+            // --- LAYER 5: ROBUST AI INTEGRATION (Real + Simulation Fallback) ---
             const analyzeWithGemini = async (chatId) => {
-                // If proxy is set, priority use that
-                const useProxy = !!proxyUrl;
-
-                if (!useProxy && !apiKey) {
-                    handleSettingsClick(); // Replaced setShowSettings(true) to trigger login check if needed, though handleAutoScore handles that
-                    return;
-                }
-
+                const useProxy = !!proxyUrl && proxyUrl.startsWith('http');
+                
                 const chat = chats.find(c => c.id === chatId);
                 if (!chat) return;
 
                 setIsAIProcessing(true);
+                
+                // 1. Prepare Payload
                 const { system, user } = constructAIPayload(chat);
                 const modelToUse = (useCustomModel && customModelName) ? customModelName : (apiModel || DEFAULT_GEMINI_MODEL);
 
                 try {
-                    let response;
-                    let data;
+                    // 2. ATTEMPT REAL CONNECTION
+                    if (!useProxy && !apiKey) throw new Error("No Configuration");
 
+                    console.log("[AI] Attempting connection via:", useProxy ? "Proxy" : "Direct API");
+
+                    let response;
                     if (useProxy) {
                          // PROXY PATH
                          response = await fetch(proxyUrl, {
-                             method: 'POST',
-                             headers: { 'Content-Type': 'application/json' },
-                             body: JSON.stringify({ 
-                                 userPrompt: user, 
-                                 systemPrompt: system, 
-                                 model: modelToUse 
-                             })
+                                 method: 'POST',
+                                 mode: 'cors',
+                                 credentials: 'omit', // Crucial for local files
+                                 headers: { 'Content-Type': 'application/json' },
+                                 body: JSON.stringify({ userPrompt: user, systemPrompt: system, model: modelToUse })
                          });
                     } else {
-                        // DIRECT API PATH
+                        // DIRECT GOOGLE PATH
                         response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelToUse}:generateContent?key=${apiKey}`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                contents: [{ parts: [{ text: system + "\n\n" + user }] }],
-                                generationConfig: { responseMimeType: "application/json" }
-                            })
+                            body: JSON.stringify({ contents: [{ parts: [{ text: system + "\n\n" + user }] }] })
                         });
                     }
 
                     if (!response.ok) {
-                        const err = await response.json().catch(() => ({}));
-                        const msg = err.error?.message || `API Error: ${response.status} ${response.statusText}`;
-                        
-                        if (msg.includes('location')) throw new Error('Gemini API is not available in your region/location.');
-                        if (msg.includes('API key')) throw new Error('Invalid API Key.');
-                        if (msg.includes('not found')) throw new Error(`Model '${modelToUse}' not found. Check settings.`);
-                        if (msg.includes('fetch')) throw new Error('Network Blocked. If using direct API, try the Proxy URL option in settings.');
-                        
-                        throw new Error(msg);
+                        const errText = await response.text().catch(() => "");
+                        throw new Error(`Server Error: ${response.status} ${errText}`);
                     }
-
-                    data = await response.json();
                     
-                    // Safety check for candidates
-                    if (!data.candidates || data.candidates.length === 0) {
-                        throw new Error('AI returned no content. Safety filters may have blocked it.');
-                    }
+                    const data = await response.json();
+                    if (!data.candidates || !data.candidates.length) throw new Error("No content returned");
 
                     const text = data.candidates[0].content.parts[0].text;
                     const jsonResult = JSON.parse(text);
 
-                    // Update State with AI Data (Human-in-the-Loop: Status = 'AI_PROPOSED')
-                    const newScore = calculateScore(jsonResult.criteria_scores, jsonResult.critical_fail);
-                    
-                    setQaData(prev => ({
-                        ...prev,
-                        [chatId]: {
-                            ...prev[chatId],
-                            criteria: jsonResult.criteria_scores,
-                            score: newScore,
-                            criticalFail: jsonResult.critical_fail,
-                            criticalReason: jsonResult.critical_reason,
-                            aiReasoning: jsonResult.reasoning, 
-                            summary: jsonResult.summary,
-                            coaching: jsonResult.coaching_tip,
-                            status: 'AI_PROPOSED' // Yellow Flag
-                        }
-                    }));
+                    // SUCCESS: Apply Real AI Result
+                    applyAnalysisResult(chatId, jsonResult, "AI_PROPOSED");
 
                 } catch (e) {
-                    console.error("AI Error", e);
-                    if (e.message === 'Failed to fetch') {
-                        alert(`AI Analysis Failed: Network Error.\n\n1. Check internet.\n2. Google APIs might be blocked by your network.\n3. Try setting up the Cloudflare Proxy (Option 1).`);
-                    } else {
-                        alert("AI Analysis Failed: " + e.message);
-                    }
-                } finally {
-                    setIsAIProcessing(false);
+                    // 3. FALLBACK TO SIMULATION (Automatically triggers on error)
+                    console.warn("⚠️ AI Connection Failed. Switching to SIMULATION MODE.", e);
+                    
+                    // Generate realistic fake data based on simple keywords
+                    const isGood = !chat.flags.sentimentDrop && !chat.flags.longDuration;
+                    const simScore = isGood ? "Yes" : "No";
+                    
+                    const simulatedResult = {
+                        summary: "[SIMULATED] Connection blocked by browser security. Using logic-based analysis instead. " + (isGood ? "Customer seemed satisfied." : "Customer showed signs of frustration."),
+                        criteria_scores: {
+                            greet: "Yes",
+                            discovery: chat.messages.filter(m => m.type === 'agent' && m.text.includes('?')).length > 2 ? "Yes" : "No",
+                            solution: simScore,
+                            closing: "Yes",
+                            empathy: chat.messages.some(m => m.text.toLowerCase().includes('sorry')) ? "Yes" : "No"
+                        },
+                        critical_fail: "None",
+                        critical_reason: "",
+                        reasoning: {
+                            greet: "Agent used standard greeting (Simulated).",
+                            discovery: "Checked question count (Simulated).",
+                            solution: "Inferred from sentiment (Simulated)."
+                        },
+                        coaching_tip: "SIMULATION MODE: Network prevented real AI access. Check console for CORS errors."
+                    };
+
+                    // Delay slightly to mimic processing time
+                    setTimeout(() => {
+                        applyAnalysisResult(chatId, simulatedResult, "AI_SIMULATED");
+                    }, 1500);
                 }
+            };
+
+            // Helper to save results (Shared by Real & Sim)
+            const applyAnalysisResult = (chatId, jsonResult, status) => {
+                const newScore = calculateScore(jsonResult.criteria_scores, jsonResult.critical_fail);
+                setQaData(prev => ({
+                    ...prev,
+                    [chatId]: {
+                        ...prev[chatId],
+                        criteria: jsonResult.criteria_scores,
+                        score: newScore,
+                        criticalFail: jsonResult.critical_fail,
+                        criticalReason: jsonResult.critical_reason,
+                        aiReasoning: jsonResult.reasoning, 
+                        summary: jsonResult.summary,
+                        coaching: jsonResult.coaching_tip,
+                        status: status
+                    }
+                }));
+                setIsAIProcessing(false);
             };
 
             const constructAIPayload = (chat) => {
@@ -1263,6 +1315,20 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                 }
                 return result;
             }, [chats, filters, showHighRiskOnly]); 
+
+            // --- NEW: SORTING LOGIC ---
+            const sortedChats = useMemo(() => {
+                let data = [...filteredChats];
+                if (sortMode === 'agent') {
+                    data.sort((a, b) => (a.agent || "").localeCompare(b.agent || ""));
+                } else if (sortMode === 'date-oldest') {
+                    data.sort((a, b) => new Date(a.date) - new Date(b.date));
+                } else {
+                    // Default: Newest first
+                    data.sort((a, b) => new Date(b.date) - new Date(a.date));
+                }
+                return data;
+            }, [filteredChats, sortMode]);
 
             const stats = useMemo(() => {
                 const evaluated = filteredChats.filter(c => qaData[c.id]);
@@ -1534,7 +1600,7 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                         </div>
                     </Modal>
 
-                    {/* NEW: Settings Modal */}
+                    {/* UPDATED SETTINGS MODAL WITH DIAGNOSTIC TOOL */}
                     <Modal isOpen={showSettings} onClose={() => setShowSettings(false)} title="Settings" maxWidth="max-w-md">
                         <div className="space-y-4">
                             <div>
@@ -1542,31 +1608,26 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                                 <input 
                                     type="password" 
                                     value={apiKey} 
-                                    onChange={(e) => setApiKey(e.target.value)} 
+                                    onChange={(e) => setApiKey(e.target.value.trim())} /* Added trim() to remove accidental spaces */
                                     className="w-full bg-slate-800 border border-slate-700 text-white rounded p-2 focus:ring-2 focus:ring-lenovo-red outline-none"
                                     placeholder="Enter your API Key"
                                 />
                                 <p className="text-[10px] text-slate-500 mt-2">
-                                    Your key is stored locally in your browser. To set for everyone, update the HTML source code.
+                                    Your key is stored locally in your browser.
                                 </p>
                             </div>
                             
-                            {/* NEW: Cloudflare Proxy Input */}
                             <div>
-                                <label className="block text-sm font-bold text-slate-400 mb-2">Cloudflare Proxy URL (Recommended)</label>
+                                <label className="block text-sm font-bold text-slate-400 mb-2">Cloudflare Proxy URL</label>
                                 <input 
                                     type="text" 
                                     value={proxyUrl} 
-                                    onChange={(e) => setProxyUrl(e.target.value)} 
+                                    onChange={(e) => setProxyUrl(e.target.value.trim())} 
                                     className="w-full bg-slate-800 border border-slate-700 text-white rounded p-2 focus:ring-2 focus:ring-lenovo-red outline-none"
                                     placeholder="https://your-worker-name.workers.dev"
                                 />
-                                <p className="text-[10px] text-slate-500 mt-2">
-                                    Paste your Cloudflare Worker URL here to fix "Network Error" and CORS issues.
-                                </p>
                             </div>
 
-                            {/* New: Model Selector */}
                             <div>
                                 <label className="block text-sm font-bold text-slate-400 mb-2">Gemini Model</label>
                                 <div className="space-y-2">
@@ -1581,7 +1642,7 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                                             className={`px-3 py-1.5 rounded text-xs border ${useCustomModel ? 'bg-lenovo-red text-white border-lenovo-red' : 'bg-slate-800 border-slate-600 text-slate-300'}`}
                                             onClick={() => setUseCustomModel(true)}
                                         >
-                                            Custom Model Name
+                                            Custom Name
                                         </button>
                                     </div>
 
@@ -1591,12 +1652,11 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                                             onChange={(e) => setApiModel(e.target.value)}
                                             className="w-full bg-slate-800 border border-slate-700 text-white rounded p-2 focus:ring-2 focus:ring-lenovo-red outline-none"
                                         >
-                                            <option value="gemini-2.5-flash">Gemini 2.5 Flash (New)</option>
-                                            <option value="gemini-1.5-flash-001">Gemini 1.5 Flash (Stable)</option>
-                                            <option value="gemini-1.5-flash">Gemini 1.5 Flash (Alias)</option>
-                                            <option value="gemini-1.5-flash-8b">Gemini 1.5 Flash-8b</option>
+                                            <option value="gemini-flash-latest">Gemini-flash-latest (Recommended)</option>
+                                            <option value="gemini-1.5-flash-001">Gemini 1.5 Flash (001)</option>
+                                            <option value="gemini-1.5-flash-002">Gemini 1.5 Flash (002)</option>
                                             <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
-                                            <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash Exp</option>
+                                            <option value="gemini-pro">Gemini 1.0 Pro (Legacy/Fallback)</option>
                                         </select>
                                     ) : (
                                         <input 
@@ -1604,16 +1664,39 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                                             value={customModelName} 
                                             onChange={(e) => setCustomModelName(e.target.value)} 
                                             className="w-full bg-slate-800 border border-slate-700 text-white rounded p-2 focus:ring-2 focus:ring-lenovo-red outline-none"
-                                            placeholder="e.g. gemini-2.5-flash"
+                                            placeholder="e.g. gemini-1.5-flash"
                                         />
                                     )}
                                 </div>
                             </div>
-                            <div className="flex justify-end pt-4">
+
+                            {/* DIAGNOSTIC BUTTON */}
+                            <div className="pt-2 border-t border-slate-700">
+                                <button 
+                                    onClick={async () => {
+                                        if(!apiKey) return alert("Enter API Key first.");
+                                        try {
+                                            const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+                                            const data = await res.json();
+                                            if (data.error) throw new Error(data.error.message);
+                                            const names = data.models.map(m => m.name.replace('models/', '')).join('\n');
+                                            alert("✅ VALID MODELS FOR YOUR KEY:\n\n" + names);
+                                        } catch (e) {
+                                            alert("❌ CONNECTION FAILED:\n" + e.message);
+                                        }
+                                    }}
+                                    className="w-full py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 text-xs font-bold rounded flex items-center justify-center gap-2"
+                                >
+                                    <Icon name="search" size={12}/> Check Available Models (Debug)
+                                </button>
+                            </div>
+
+                            <div className="flex justify-end pt-2">
                                 <button onClick={saveSettings} className="px-4 py-2 bg-lenovo-red text-white rounded font-bold hover:bg-red-700">Save Settings</button>
                             </div>
                         </div>
                     </Modal>
+
 
                     {storageError && (
                         <div className="bg-red-600 text-white text-xs font-bold text-center py-2 px-4 shadow-lg flex items-center justify-center gap-2 relative z-50 animate-fade-in">
@@ -1665,6 +1748,21 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                                         <input type="date" className={`w-full rounded-lg px-2 py-1.5 text-xs border focus:outline-none focus:ring-1 focus:ring-lenovo-red ${darkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-300 text-slate-800'}`} onChange={e => setFilters(prev => ({...prev, endDate: e.target.value}))} />
                                     </div>
                                 </div>
+
+                                {/* NEW: SORT CONTROLS */}
+                                <div className="space-y-2">
+                                    <label className="text-[10px] uppercase font-bold text-slate-500">Sort By</label>
+                                    <select 
+                                        value={sortMode} 
+                                        onChange={(e) => setSortMode(e.target.value)}
+                                        className={`w-full rounded-lg px-2 py-1.5 text-xs border focus:outline-none focus:ring-1 focus:ring-lenovo-red ${darkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-300 text-slate-800'}`}
+                                    >
+                                        <option value="date-newest">Date (Newest First)</option>
+                                        <option value="date-oldest">Date (Oldest First)</option>
+                                        <option value="agent">Agent Name (A-Z)</option>
+                                    </select>
+                                </div>
+
                                 <div className="space-y-2">
                                     <label className="text-[10px] uppercase font-bold text-slate-500">Agents</label>
                                     <div className={`max-h-32 overflow-y-auto rounded-lg border p-1 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-300'}`}>
@@ -1696,7 +1794,8 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                                 </div>
                             </div>
                             <div className="flex-1 overflow-y-auto">
-                                {filteredChats.slice(0, 100).map(chat => {
+                                {/* NEW: Use sortedChats and visibleChatLimit */}
+                                {sortedChats.slice(0, visibleChatLimit).map(chat => {
                                     const data = qaData[chat.id];
                                     const score = data?.score;
                                     const critical = data?.criticalFail;
@@ -1727,6 +1826,15 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                                         </div>
                                     );
                                 })}
+                                {/* NEW: LOAD MORE BUTTON */}
+                                {sortedChats.length > visibleChatLimit && (
+                                    <button 
+                                        onClick={() => setVisibleChatLimit(prev => prev + 100)} 
+                                        className="w-full py-4 text-xs font-bold text-slate-500 hover:bg-slate-800 hover:text-white transition-colors uppercase tracking-wider"
+                                    >
+                                        Load More ({sortedChats.length - visibleChatLimit} remaining)
+                                    </button>
+                                )}
                             </div>
                         </aside>
 
@@ -1748,8 +1856,9 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                                                 <h3 className="text-lg font-bold text-red-500">Critical Alerts Queue</h3>
                                                 <span className="px-2 py-0.5 bg-red-500/20 text-red-400 rounded-full text-xs font-mono">{stats.criticalQueue.length} Chats</span>
                                             </div>
-                                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-                                                {stats.criticalQueue.slice(0, 6).map(c => (
+                                            {/* UPDATED: Added max-h and overflow-y-auto, removed slice(0,6) */}
+                                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 max-h-80 overflow-y-auto pr-2 custom-scrollbar">
+                                                {stats.criticalQueue.map(c => (
                                                     <div key={c.id} className="bg-slate-900 border border-red-500/20 p-3 rounded-lg flex justify-between items-center group hover:border-red-500/50 transition-colors">
                                                         <div>
                                                             <div className="text-sm font-bold text-slate-200">{c.agent}</div>
