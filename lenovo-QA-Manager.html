@@ -1,0 +1,1563 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lenovo QA Manager</title>
+    
+    <!-- React & ReactDOM -->
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    
+    <!-- Babel -->
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        lenovo: {
+                            red: '#E2231A',
+                            dark: '#D11006'
+                        },
+                        slate: {
+                            850: '#1e293b', 
+                            900: '#0f172a',
+                            950: '#020617',
+                        }
+                    },
+                    fontFamily: {
+                        sans: ['Inter', 'sans-serif'],
+                    }
+                }
+            }
+        }
+    </script>
+    
+    <!-- Libraries -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2"></script>
+
+    <!-- Fonts -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+        
+        body {
+            font-family: 'Inter', sans-serif;
+            overflow: hidden;
+        }
+
+        /* Glassmorphism */
+        .glass-panel {
+            background: rgba(30, 41, 59, 0.7);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1px solid rgba(255, 255, 255, 0.08);
+        }
+        
+        .light .glass-panel {
+            background: rgba(255, 255, 255, 0.8);
+            border: 1px solid rgba(0, 0, 0, 0.05);
+        }
+
+        /* Loading Spinner */
+        .loader {
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-left-color: #E2231A;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+
+        /* Scrollbars */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #64748b; }
+
+        /* Animations */
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+        .animate-fade-in { animation: fadeIn 0.4s ease-out forwards; }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-200 transition-colors duration-300">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo, useRef, useCallback } = React;
+        
+        Chart.register(ChartDataLabels);
+
+        // --- CONSTANTS & CONFIG ---
+
+        const CORE_AGENTS = [
+            "Amir Daniel", "Amr Ibrahim", "Rawan Essam", "Noura Aly", "Youssef Abdelshafy"
+        ];
+
+        // Centralized Keywords for Logic AND Highlighting
+        const KEYWORDS = {
+            greetings: [
+                'hello', 'hi', 'welcome', 'good morning', 'good afternoon', 'good evening', 
+                'thank you for contacting', 'thanks for contacting', 'how can i help', 'my name is',
+                'chatting with', 'pleasure to meet', 'reaching out', 'assist you today'
+            ],
+            empathy: [
+                'sorry', 'apologize', 'understand', 'regret', 'unfortunate', 'frustrating', 
+                'bear with me', 'my apologies', 'sorry for the inconvenience', 'i assure you',
+                'totally understand', 'hear that', 'must be difficult', 'resolve this', 
+                'on the same page', 'make this right', 'trouble you are facing'
+            ],
+            hold: [
+                'hold', 'moment', 'check', 'bear with me', 'allow me to check', 'look into this', 
+                'researching', 'brief hold', 'few minutes', 'consult', 'pull up', 'accessing', 
+                'give me a second', 'quick check', 'grabbing that info'
+            ],
+            warranty: [
+                'warranty', 'care', 'support', 'accessory', 'guarantee', 'repair', 'depot', 
+                'onsite', 'accidental', 'damage', 'protection', 'sealed battery', 'keep your drive', 
+                'adp', 'premier', 'upgrade warranty', 'warranty status', 'entitlement', 
+                'base warranty', 'smart performance'
+            ],
+            accessories: [
+                'mouse', 'keyboard', 'monitor', 'dock', 'charger', 'adapter', 'headset', 'bag', 
+                'case', 'sleeve', 'cable', 'hub', 'webcam', 'stylus', 'pen', 'privacy filter', 
+                'backpack', 'stand', 'speaker', 'hard drive', 'ssd', 'ram', 'memory', 'power bank'
+            ],
+            closing: [
+                'anything else', 'further', 'assist you', 'other questions', 'help you with',
+                'additional questions', 'support you', 'else i can do'
+            ],
+            profClosing: [
+                'thank', 'bye', 'wonderful day', 'great day', 'rest of your day', 'take care', 
+                'goodbye', 'appreciate your business', 'thanks for choosing'
+            ],
+            csat: [
+                'survey', 'feedback', 'short survey', 'rate', 'experience', 'email', 
+                'satisfaction', 'how i did', 'valued feedback'
+            ],
+            discovery: [
+                '?', 'what', 'how', 'need', 'looking for', 'intend to use', 'purpose', 
+                'usage', 'budget', 'preference', 'screen size', 'processor', 'storage', 
+                'primary use', 'work', 'school', 'gaming'
+            ],
+            // Critical
+            cxCritical: [
+                'shut up', 'idiot', 'stupid', 'dumb', 'hate you', 'don\'t care', 'whatever', 
+                'ridiculous', 'liar', 'waste of time'
+            ],
+            compCritical: [
+                'credit card', 'cvv', 'card number', 'expiry', 'social security', 'ssn', 
+                'password', 'login credentials'
+            ]
+        };
+
+        const SCORECARD = {
+            "Opening": [
+                { id: "greet", text: "Agent greeted the customer professionally and introduced themselves", weight: 2.0 },
+                { id: "confirm", text: "Agent confirmed the customer’s name and reason for contact", weight: 3.0 }
+            ],
+            "Communication": [
+                { id: "listening", text: "Agent conversed actively without interrupting (Active Listening)", weight: 5.0 },
+                { id: "clear", text: "Language was clear, professional, and free of jargon", weight: 5.0 },
+                { id: "empathy", text: "Agent acknowledged customer concerns with empathy", weight: 5.0 },
+                { id: "tone", text: "Tone was confident, professional, and engaging", weight: 2.0 },
+                { id: "hold", text: "Agent applied correct hold etiquette", weight: 3.0 }
+            ],
+            "Solution/Sales": [
+                { id: "discovery", text: "Agent asked relevant discovery questions to understand needs", weight: 7.5 },
+                { id: "product", text: "Agent demonstrated strong product and service knowledge", weight: 7.5 },
+                { id: "solution", text: "Agent offered the right solution based on identified needs", weight: 7.5 },
+                { id: "objection", text: "Agent handled objections and highlighted competitive advantages", weight: 7.5 },
+                { id: "warranty", text: "Agent clearly stated warranty benefits / Accessories", weight: 15.0 }
+            ],
+            "Process": [
+                { id: "next_steps", text: "Agent confirmed next steps and call to action", weight: 5.0 },
+                { id: "compliance", text: "Agent followed sales process and compliance guidelines", weight: 10.0 }
+            ],
+            "Closing": [
+                { id: "transfer", text: "Agent performed transfer to correct queue (if applicable)", weight: 2.0 },
+                { id: "disposition", text: "Agent applied correct disposition and CRM notes", weight: 4.0 },
+                { id: "addressed", text: "Agent confirmed if the query was fully addressed", weight: 2.0 },
+                { id: "end_prof", text: "Agent ended the interaction professionally", weight: 2.0 },
+                { id: "csat", text: "Closing Csat Statement", weight: 5.0 }
+            ]
+        };
+
+        const CRITICAL_TYPES = ["None", "CX Critical", "Compliance Critical", "Business Critical"];
+
+        const CRITICAL_DEFINITIONS = {
+            "CX Critical": [
+                "Rude attitude or sarcasm.",
+                "Providing misleading or wrong information.",
+                "Chat Dumping (ending chat while customer is typing).",
+                "Performing a wrong or invalid transfer."
+            ],
+            "Business Critical": [
+                "Stacking or apply discounts improperly.",
+                "Quoting unauthorized prices.",
+                "Misrepresenting specifications."
+            ],
+            "Compliance Critical": [
+                "PCI DSS: Asking for/accepting Credit Card info.",
+                "GDPR: Sharing personal data."
+            ]
+        };
+
+        // --- UTILS ---
+
+        const Icon = ({ name, size = 18, className = "" }) => {
+            useEffect(() => lucide.createIcons(), [name]);
+            return <i data-lucide={name} width={size} height={size} className={className}></i>;
+        };
+
+        // Date Parser for "DD/MM/YYYY HH:mm:ss" and ISO
+        const parseDate = (dateStr) => {
+            if (!dateStr || typeof dateStr !== 'string') return new Date(0);
+            
+            const cleanStr = dateStr.trim();
+            const parts = cleanStr.split(/[\/\-\s:TZ]/).filter(p => p !== ""); 
+            
+            if (parts.length >= 3) {
+                let day, month, year, hours=0, minutes=0, seconds=0;
+
+                if (parts[2].length === 4) {
+                    day = parseInt(parts[0], 10);
+                    month = parseInt(parts[1], 10) - 1; 
+                    year = parseInt(parts[2], 10);
+                    if (parts.length >= 4) hours = parseInt(parts[3], 10);
+                    if (parts.length >= 5) minutes = parseInt(parts[4], 10);
+                    if (parts.length >= 6) seconds = parseInt(parts[5], 10);
+                    return new Date(year, month, day, hours, minutes, seconds);
+                }
+                
+                if (parts[0].length === 4) {
+                    year = parseInt(parts[0], 10);
+                    month = parseInt(parts[1], 10) - 1;
+                    day = parseInt(parts[2], 10);
+                    if (parts.length >= 4) hours = parseInt(parts[3], 10);
+                    if (parts.length >= 5) minutes = parseInt(parts[4], 10);
+                    if (parts.length >= 6) seconds = parseInt(parts[5], 10);
+                    return new Date(year, month, day, hours, minutes, seconds);
+                }
+            }
+
+            const d = new Date(dateStr);
+            return isNaN(d.getTime()) ? new Date(0) : d;
+        };
+
+        const formatDate = (dateObj) => {
+            return dateObj.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+        };
+        
+        const getLocalDateKey = (dateObj) => {
+            if (!dateObj || isNaN(dateObj.getTime())) return '1970-01-01';
+            const y = dateObj.getFullYear();
+            const m = String(dateObj.getMonth() + 1).padStart(2, '0');
+            const d = String(dateObj.getDate()).padStart(2, '0');
+            return `${y}-${m}-${d}`;
+        };
+
+        // --- CHART COMPONENT ---
+        const ChartComponent = ({ type, data, options }) => {
+            const canvasRef = useRef(null);
+            const chartRef = useRef(null);
+
+            useEffect(() => {
+                if (!canvasRef.current) return;
+                
+                // Wrap chart creation in RAF to prevent layout thrashing
+                requestAnimationFrame(() => {
+                    if (chartRef.current) {
+                        chartRef.current.destroy();
+                        chartRef.current = null;
+                    }
+                    
+                    const finalOptions = {
+                        ...options,
+                        plugins: {
+                            ...options.plugins,
+                            datalabels: {
+                                color: '#fff',
+                                font: { weight: 'bold', size: 10 },
+                                display: (context) => context.dataset.data[context.dataIndex] > 0,
+                                formatter: (value) => value,
+                                ...(options.plugins?.datalabels || {})
+                            }
+                        }
+                    };
+                    
+                    chartRef.current = new Chart(canvasRef.current, { type, data, options: finalOptions });
+                });
+
+                return () => { 
+                    if (chartRef.current) {
+                        chartRef.current.destroy(); 
+                        chartRef.current = null;
+                    }
+                };
+            }, [type, data, options]);
+
+            return <canvas ref={canvasRef} />;
+        };
+
+        // --- HIGHLIGHTER COMPONENT ---
+        const HighlightedText = ({ text }) => {
+            if (!text) return null;
+
+            const positiveKeywords = [
+                ...KEYWORDS.greetings, ...KEYWORDS.empathy, ...KEYWORDS.hold, 
+                ...KEYWORDS.warranty, ...KEYWORDS.accessories, ...KEYWORDS.closing, 
+                ...KEYWORDS.profClosing, ...KEYWORDS.csat, ...KEYWORDS.discovery
+            ].filter(k => k.length > 1);
+
+            const criticalKeywords = [...KEYWORDS.cxCritical, ...KEYWORDS.compCritical];
+
+            const words = text.split(/(\s+)/);
+
+            return (
+                <span>
+                    {words.map((word, i) => {
+                        const lower = word.toLowerCase().replace(/[^a-z0-9]/g, '');
+                        if (!lower) return <span key={i}>{word}</span>;
+
+                        const isCritical = criticalKeywords.some(k => lower.includes(k));
+                        const isPositive = !isCritical && positiveKeywords.some(k => lower === k || (k.length > 3 && lower.includes(k)));
+
+                        if (isCritical) {
+                            return <span key={i} className="bg-red-500/40 text-white font-bold rounded px-0.5 border border-red-500">{word}</span>;
+                        }
+                        if (isPositive) {
+                            return <span key={i} className="bg-emerald-500/30 text-emerald-200 font-medium rounded px-0.5 border border-emerald-500/30">{word}</span>;
+                        }
+                        return <span key={i}>{word}</span>;
+                    })}
+                </span>
+            );
+        };
+
+        // --- LOADING OVERLAY ---
+        // FIX: Using CSS opacity instead of conditional rendering to avoid 'removeChild' errors on heavy load
+        const LoadingOverlay = ({ progress, message, visible }) => (
+            <div className={`fixed inset-0 z-[100] flex flex-col items-center justify-center bg-slate-950/90 backdrop-blur-md transition-opacity duration-300 ${visible ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'}`}>
+                <div className="loader mb-6"></div>
+                <h3 className="text-xl font-bold text-white mb-2">{message}</h3>
+                <div className="w-64 h-2 bg-slate-800 rounded-full overflow-hidden">
+                    <div className="h-full bg-lenovo-red transition-all duration-300" style={{ width: `${progress}%` }}></div>
+                </div>
+                <p className="text-slate-400 text-sm mt-2">{progress}% Complete</p>
+            </div>
+        );
+
+        // --- MODAL COMPONENT ---
+        const Modal = ({ isOpen, onClose, title, children }) => {
+            if (!isOpen) return null;
+            return (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+                    <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose}></div>
+                    <div className="relative bg-slate-900 border border-slate-700 rounded-xl shadow-2xl w-full max-w-lg overflow-hidden animate-fade-in">
+                        <div className="flex justify-between items-center p-4 border-b border-slate-800 bg-slate-800/50">
+                            <h3 className="font-bold text-white text-lg">{title}</h3>
+                            <button onClick={onClose} className="text-slate-400 hover:text-white"><Icon name="x" /></button>
+                        </div>
+                        <div className="p-6 overflow-y-auto max-h-[80vh]">
+                            {children}
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        // --- ERROR BOUNDARY ---
+        class ErrorBoundary extends React.Component {
+            constructor(props) {
+                super(props);
+                this.state = { hasError: false, error: null };
+            }
+
+            static getDerivedStateFromError(error) {
+                return { hasError: true, error };
+            }
+
+            componentDidCatch(error, errorInfo) {
+                console.error("Uncaught error:", error, errorInfo);
+            }
+
+            render() {
+                if (this.state.hasError) {
+                    return (
+                        <div className="min-h-screen flex items-center justify-center bg-slate-950 text-white p-8 text-center font-sans">
+                            <div className="max-w-xl bg-slate-900 p-8 rounded-2xl border border-slate-800 shadow-2xl">
+                                <div className="text-lenovo-red mb-4 flex justify-center"><Icon name="alert-triangle" size={48} /></div>
+                                <h1 className="text-3xl font-bold text-white mb-4">Something went wrong</h1>
+                                <p className="text-slate-400 mb-6">
+                                    The application encountered a critical error. This is likely due to the file size exceeding browser memory limits.
+                                </p>
+                                <div className="p-4 bg-slate-950 rounded border border-slate-800 font-mono text-xs text-left overflow-auto max-h-40 mb-6 text-red-400">
+                                    {this.state.error && this.state.error.toString()}
+                                </div>
+                                <button onClick={() => window.location.reload()} className="px-6 py-3 bg-lenovo-red text-white rounded-lg font-bold hover:bg-red-700 transition-colors w-full">
+                                    Reload Application
+                                </button>
+                            </div>
+                        </div>
+                    );
+                }
+                return this.props.children;
+            }
+        }
+
+        // --- MAIN APP COMPONENT ---
+
+        const App = () => {
+            // Data State
+            const [chats, setChats] = useState([]);
+            const [surveys, setSurveys] = useState({});
+            const [qaData, setQaData] = useState({}); 
+            const [storageError, setStorageError] = useState(null);
+            
+            // Loading State
+            const [isLoading, setIsLoading] = useState(false);
+            const [loadingProgress, setLoadingProgress] = useState(0);
+            const [loadingMessage, setLoadingMessage] = useState('');
+
+            // UI State
+            const [view, setView] = useState('upload'); // 'upload', 'workspace'
+            const [darkMode, setDarkMode] = useState(true);
+            const [selectedChatId, setSelectedChatId] = useState(null);
+            const [showCritInfo, setShowCritInfo] = useState(false);
+            
+            // Filters & Selectors
+            const [filters, setFilters] = useState({
+                startDate: '',
+                endDate: '',
+                agents: new Set(CORE_AGENTS),
+                sampleMode: false,
+                sampleSize: 3
+            });
+
+            const [trendAgent, setTrendAgent] = useState('All Agents');
+
+            // --- LOCAL STORAGE LOGIC ---
+            useEffect(() => {
+                const saved = localStorage.getItem('lenovo-qa-data');
+                if (saved) {
+                    try {
+                        const parsed = JSON.parse(saved);
+                        if (parsed.chats) {
+                            const revivedChats = parsed.chats.map(c => ({
+                                ...c,
+                                date: new Date(c.date)
+                            }));
+                            setChats(revivedChats);
+                        }
+                        if (parsed.surveys) setSurveys(parsed.surveys);
+                        if (parsed.qaData) setQaData(parsed.qaData);
+                        if (parsed.chats && parsed.chats.length > 0) setView('workspace');
+                    } catch (e) {
+                        console.error("Failed to load local storage", e);
+                    }
+                }
+            }, []);
+
+            useEffect(() => {
+                if (chats.length > 0) {
+                    try {
+                        localStorage.setItem('lenovo-qa-data', JSON.stringify({ chats, surveys, qaData }));
+                        setStorageError(null);
+                    } catch (e) {
+                        console.warn("Storage Limit Exceeded", e);
+                        setStorageError("Auto-Save Disabled: Data size exceeds browser limits. Please export your results before closing.");
+                    }
+                }
+            }, [chats, surveys, qaData]);
+
+            const clearData = () => {
+                localStorage.removeItem('lenovo-qa-data');
+                setChats([]);
+                setSurveys({});
+                setQaData({});
+                setStorageError(null);
+                setView('upload');
+            };
+
+            useEffect(() => {
+                document.documentElement.classList.toggle('dark', darkMode);
+                document.documentElement.classList.toggle('light', !darkMode);
+            }, [darkMode]);
+
+            // --- LOGIC: PARSING & PROCESSING ---
+
+            const handleFileUpload = (e, type) => {
+                const files = Array.from(e.target.files);
+                if (!files.length) return;
+
+                setIsLoading(true);
+                setLoadingMessage(`Reading ${files.length} file(s)...`);
+                setLoadingProgress(0);
+
+                if (type === 'chats') {
+                    let completedFiles = 0;
+                    let aggregatedRows = [];
+
+                    files.forEach(file => {
+                        Papa.parse(file, {
+                            header: true,
+                            skipEmptyLines: true,
+                            complete: (results) => {
+                                aggregatedRows = aggregatedRows.concat(results.data);
+                                completedFiles++;
+                                
+                                setLoadingMessage(`Reading file ${completedFiles} of ${files.length}...`);
+
+                                if (completedFiles === files.length) {
+                                    setLoadingMessage(`Processing ${aggregatedRows.length} combined rows...`);
+                                    setTimeout(() => processChatRowsChunked(aggregatedRows), 100);
+                                }
+                            }
+                        });
+                    });
+                } else {
+                    // Surveys - Keep as is (simple/per-request)
+                    files.forEach(file => {
+                        Papa.parse(file, {
+                            header: true,
+                            skipEmptyLines: true,
+                            complete: (results) => {
+                                processSurveyRows(results.data);
+                                setIsLoading(false);
+                            }
+                        });
+                    });
+                }
+            };
+
+            // CHUNKED PROCESSING TO PREVENT FREEZING
+            const processChatRowsChunked = (rows) => {
+                // 1. Grouping (Sync is usually fine for <500k rows if simple loop)
+                const groups = {};
+                rows.forEach(row => {
+                    const id = row.chatid || row['Chat ID'] || row.ConversationID;
+                    if (!id) return;
+                    if (!groups[id]) groups[id] = [];
+                    groups[id].push(row);
+                });
+
+                const groupEntries = Object.entries(groups);
+                const totalChats = groupEntries.length;
+                const CHUNK_SIZE = 500; // Process 500 chats per tick
+                let index = 0;
+                const processedBatch = [];
+
+                const processNextChunk = () => {
+                    const end = Math.min(index + CHUNK_SIZE, totalChats);
+                    
+                    for (let i = index; i < end; i++) {
+                        const [id, messages] = groupEntries[i];
+                        
+                        // -- Core Logic extracted --
+                        messages.sort((a, b) => new Date(a.date) - new Date(b.date));
+
+                        let agentName = "Unknown";
+                        let date = parseDate(messages[0]?.date);
+                        const formattedMsgs = [];
+
+                        const systemMsg = messages.find(m => 
+                            (m.from === 'System' || m.text.includes('System:')) && 
+                            (m.text.includes('Proactive chat started by') || m.text.includes('Ended by') || m.text.includes('Assigned to'))
+                        );
+
+                        if (systemMsg) {
+                            const text = systemMsg.text;
+                            const foundCore = CORE_AGENTS.find(a => text.includes(a));
+                            if (foundCore) agentName = foundCore;
+                            else {
+                                const match = text.match(/by\s+([A-Za-z\s]+)/);
+                                if (match && match[1]) agentName = match[1].trim();
+                            }
+                        }
+
+                        if (agentName === "Unknown") {
+                            const coreSender = messages.find(m => CORE_AGENTS.includes(m.from));
+                            if (coreSender) agentName = coreSender.from;
+                        }
+
+                        messages.forEach(m => {
+                            formattedMsgs.push({
+                                sender: m.from,
+                                text: m.text,
+                                time: m.date,
+                                type: CORE_AGENTS.includes(m.from) || m.from === agentName ? 'agent' : 
+                                      ['System', 'Bot', 'Lenovo Bot'].includes(m.from) ? 'system' : 'customer'
+                            });
+                        });
+
+                        processedBatch.push({
+                            id,
+                            agent: agentName,
+                            date, 
+                            messages: formattedMsgs,
+                            dateStr: messages[0]?.date
+                        });
+                        // -- End Core Logic --
+                    }
+
+                    index = end;
+                    const currentProgress = Math.round((index / totalChats) * 100);
+                    setLoadingProgress(currentProgress);
+
+                    if (index < totalChats) {
+                        setTimeout(processNextChunk, 0); // Unblock main thread
+                    } else {
+                        setChats(prev => [...prev, ...processedBatch]);
+                        // FIX: Delay hiding loader to allow React to reconcile state and DOM smoothly
+                        setTimeout(() => setIsLoading(false), 100);
+                    }
+                };
+
+                setTimeout(processNextChunk, 0);
+            };
+
+            const processSurveyRows = (rows) => {
+                const newSurveys = { ...surveys };
+                rows.forEach(row => {
+                    const id = row['Conversation ID'] || row.chatid;
+                    if (!id) return;
+                    if (!newSurveys[id]) newSurveys[id] = [];
+                    newSurveys[id].push({
+                        question: row['Survey Question'],
+                        answer: row['Survey Answer'],
+                        score: row['Survey Score']
+                    });
+                });
+                setSurveys(newSurveys);
+            };
+
+            // --- LOGIC: ANALYSIS & SCORING ---
+
+            const calculateScore = (criteria, criticalFail) => {
+                if (criticalFail && criticalFail !== "None") return 0;
+
+                let totalW = 0, earnedW = 0;
+                Object.entries(criteria).forEach(([k, v]) => {
+                    if (v === 'N/A') return;
+                    const weight = Object.values(SCORECARD).flat().find(i => i.id === k)?.weight || 0;
+                    totalW += weight;
+                    if (v === 'Yes') earnedW += weight;
+                });
+                
+                return totalW === 0 ? 0 : Math.round((earnedW / totalW) * 100);
+            };
+
+            const analyzeChat = (chat) => {
+                const msgs = chat.messages;
+                const agentMsgs = msgs.filter(m => m.type === 'agent').map(m => m.text.toLowerCase());
+                const custMsgs = msgs.filter(m => m.type === 'customer').map(m => m.text.toLowerCase());
+                
+                const criteria = {};
+                const flags = [];
+                let criticalFail = "None";
+                let criticalReason = "";
+
+                const has = (arr, kws) => {
+                    if (Array.isArray(arr)) {
+                        return arr.some(txt => kws.some(k => txt.includes(k)));
+                    }
+                    return kws.some(k => arr.includes(k));
+                };
+
+                const findTrigger = (arr, kws) => {
+                    for (const txt of arr) {
+                        for (const k of kws) {
+                            if (txt.includes(k)) return k;
+                        }
+                    }
+                    return null;
+                };
+
+                // Criteria Logic
+                criteria.greet = has(agentMsgs.slice(0, 4), KEYWORDS.greetings) ? 'Yes' : 'No';
+                criteria.confirm = 'Yes';
+                criteria.listening = 'Yes';
+                criteria.clear = 'Yes';
+                
+                const customerUpset = has(custMsgs, ['upset', 'angry', 'complaint', 'manager', 'fail', 'broken', 'slow', 'bad', 'wrong', 'ridiculous', 'waiting']);
+                if (customerUpset) {
+                    flags.push('Potential Friction');
+                    criteria.empathy = has(agentMsgs, KEYWORDS.empathy) ? 'Yes' : 'No';
+                } else {
+                    criteria.empathy = 'N/A';
+                }
+                
+                criteria.tone = 'Yes';
+                criteria.hold = has(agentMsgs, KEYWORDS.hold) ? 'Yes' : 'N/A';
+                criteria.discovery = has(agentMsgs, KEYWORDS.discovery) ? 'Yes' : 'No';
+                criteria.product = 'Yes';
+                criteria.solution = 'Yes';
+                criteria.objection = 'Yes';
+                criteria.warranty = has(agentMsgs, [...KEYWORDS.warranty, ...KEYWORDS.accessories]) ? 'Yes' : 'No';
+                criteria.next_steps = 'Yes';
+                criteria.compliance = 'Yes';
+                criteria.transfer = has(agentMsgs, ['transfer', 'connect', 'department', 'colleague']) ? 'Yes' : 'N/A';
+                criteria.disposition = 'Yes';
+                criteria.addressed = has(agentMsgs.slice(-5), KEYWORDS.closing) ? 'Yes' : 'No';
+                criteria.end_prof = has(agentMsgs.slice(-4), KEYWORDS.profClosing) ? 'Yes' : 'No';
+                criteria.csat = has(agentMsgs.slice(-4), KEYWORDS.csat) ? 'Yes' : 'No';
+
+                // Critical Fail Check & Reason
+                const cxTrigger = findTrigger(agentMsgs, KEYWORDS.cxCritical);
+                if (cxTrigger) {
+                    criticalFail = 'CX Critical';
+                    criticalReason = `Detected phrase: "${cxTrigger}"`;
+                }
+
+                const compTrigger = findTrigger(agentMsgs, KEYWORDS.compCritical);
+                if (compTrigger) {
+                    criticalFail = 'Compliance Critical';
+                    criticalReason = `Detected sensitive info: "${compTrigger}"`;
+                }
+
+                const score = calculateScore(criteria, criticalFail);
+
+                return { criteria, flags, score, criticalFail, criticalReason, status: 'AI' };
+            };
+
+            const runBatchAnalysisChunked = () => {
+                setIsLoading(true);
+                setLoadingMessage('Analyzing conversations...');
+                setLoadingProgress(0);
+
+                const newData = { ...qaData };
+                const chatsToAnalyze = filteredChats.filter(chat => !newData[chat.id] || newData[chat.id].status === 'AI');
+                
+                const total = chatsToAnalyze.length;
+                if (total === 0) {
+                    setIsLoading(false);
+                    return;
+                }
+
+                const CHUNK_SIZE = 200; 
+                let index = 0;
+
+                const analyzeNextChunk = () => {
+                    const end = Math.min(index + CHUNK_SIZE, total);
+                    for (let i = index; i < end; i++) {
+                        const chat = chatsToAnalyze[i];
+                        newData[chat.id] = analyzeChat(chat);
+                    }
+                    index = end;
+                    setLoadingProgress(Math.round((index / total) * 100));
+
+                    if (index < total) {
+                        setTimeout(analyzeNextChunk, 0);
+                    } else {
+                        setQaData(newData);
+                        // FIX: Delay hiding loader to allow React to reconcile state and DOM smoothly
+                        setTimeout(() => setIsLoading(false), 100);
+                    }
+                };
+                setTimeout(analyzeNextChunk, 0);
+            };
+
+            // --- USER INTERACTION: MODIFY SCORE ---
+
+            const updateCriterion = (chatId, criterionId, value) => {
+                setQaData(prev => {
+                    const currentChatData = prev[chatId] || analyzeChat(chats.find(c => c.id === chatId));
+                    const newCriteria = { ...currentChatData.criteria, [criterionId]: value };
+                    const newScore = calculateScore(newCriteria, currentChatData.criticalFail);
+                    
+                    return {
+                        ...prev,
+                        [chatId]: {
+                            ...currentChatData,
+                            criteria: newCriteria,
+                            score: newScore,
+                        }
+                    };
+                });
+            };
+
+            const updateCritical = (chatId, value) => {
+                setQaData(prev => {
+                    const currentChatData = prev[chatId] || analyzeChat(chats.find(c => c.id === chatId));
+                    const newScore = calculateScore(currentChatData.criteria, value);
+                    
+                    return {
+                        ...prev,
+                        [chatId]: {
+                            ...currentChatData,
+                            criticalFail: value,
+                            criticalReason: value === 'None' ? '' : 'Manual Override', // Reset reason on manual change
+                            score: newScore
+                        }
+                    };
+                });
+            };
+
+            const saveReview = (chatId) => {
+                setQaData(prev => ({
+                    ...prev,
+                    [chatId]: {
+                        ...prev[chatId],
+                        status: 'Reviewed'
+                    }
+                }));
+            };
+
+            const resetReview = (chatId) => {
+                const originalAnalysis = analyzeChat(chats.find(c => c.id === chatId));
+                setQaData(prev => ({
+                    ...prev,
+                    [chatId]: originalAnalysis
+                }));
+            };
+
+            // --- LOGIC: SAMPLING & FILTERING ---
+
+            const generateDailySample = (count) => {
+                setFilters(prev => ({ ...prev, sampleMode: true, sampleSize: count }));
+            };
+
+            const filteredChats = useMemo(() => {
+                let result = chats.filter(c => {
+                    const chatDateStr = getLocalDateKey(c.date);
+                    if (filters.startDate && chatDateStr < filters.startDate) return false;
+                    if (filters.endDate && chatDateStr > filters.endDate) return false;
+                    if (!filters.agents.has(c.agent)) return false;
+                    return true;
+                });
+
+                if (filters.sampleMode) {
+                    const buckets = {};
+                    result.forEach(c => {
+                        const day = getLocalDateKey(c.date);
+                        const key = `${c.agent}|${day}`;
+                        if (!buckets[key]) buckets[key] = [];
+                        buckets[key].push(c);
+                    });
+                    const sampled = [];
+                    Object.values(buckets).forEach(bucket => {
+                        const shuffled = bucket.sort(() => 0.5 - Math.random());
+                        sampled.push(...shuffled.slice(0, filters.sampleSize));
+                    });
+                    result = sampled;
+                }
+                return result;
+            }, [chats, filters]);
+
+            // Analytics Data - GENERAL
+            const stats = useMemo(() => {
+                const evaluated = filteredChats.filter(c => qaData[c.id]);
+                const totalEvaluated = evaluated.length;
+                
+                const criticalChats = evaluated.filter(c => qaData[c.id].criticalFail && qaData[c.id].criticalFail !== "None");
+
+                if (totalEvaluated === 0) return { avgScore: 0, totalEvaluated: 0, criticals: 0, agentStats: {}, dates: {}, criticalQueue: [], categoryScores: {} };
+
+                const avgScore = Math.round(evaluated.reduce((acc, c) => acc + qaData[c.id].score, 0) / totalEvaluated);
+                const criticals = criticalChats.length;
+
+                const agentStats = {};
+                evaluated.forEach(c => {
+                    if (!agentStats[c.agent]) agentStats[c.agent] = { total: 0, count: 0, criticals: 0 };
+                    agentStats[c.agent].total += qaData[c.id].score;
+                    agentStats[c.agent].count++;
+                    if (qaData[c.id].criticalFail && qaData[c.id].criticalFail !== "None") agentStats[c.agent].criticals++;
+                });
+
+                const dates = {};
+                evaluated.forEach(c => {
+                    const d = getLocalDateKey(c.date);
+                    if (!dates[d]) dates[d] = { total: 0, count: 0 };
+                    dates[d].total += qaData[c.id].score;
+                    dates[d].count++;
+                });
+
+                // Category Analysis for Radar Chart
+                const categoryTotals = {};
+                const categoryCounts = {};
+                evaluated.forEach(c => {
+                    const q = qaData[c.id];
+                    Object.entries(SCORECARD).forEach(([catName, criteriaList]) => {
+                        if (!categoryTotals[catName]) { categoryTotals[catName] = 0; categoryCounts[catName] = 0; }
+                        
+                        // Calculate score for this category in this chat
+                        let catPossible = 0;
+                        let catEarned = 0;
+                        criteriaList.forEach(item => {
+                            if (q.criteria[item.id] !== 'N/A') {
+                                catPossible += item.weight;
+                                if (q.criteria[item.id] === 'Yes') catEarned += item.weight;
+                            }
+                        });
+                        
+                        if (catPossible > 0) {
+                            const catScore = (catEarned / catPossible) * 100;
+                            categoryTotals[catName] += catScore;
+                            categoryCounts[catName]++;
+                        }
+                    });
+                });
+
+                const categoryScores = {};
+                Object.keys(categoryTotals).forEach(cat => {
+                    categoryScores[cat] = categoryCounts[cat] > 0 ? Math.round(categoryTotals[cat] / categoryCounts[cat]) : 0;
+                });
+                
+                return { avgScore, totalEvaluated, criticals, agentStats, dates, criticalQueue: criticalChats, categoryScores };
+            }, [filteredChats, qaData]);
+
+            // Analytics Data - TREND SPECIFIC
+            const trendStats = useMemo(() => {
+                const evaluated = filteredChats.filter(c => qaData[c.id]);
+                const dailyData = {};
+                let maxCount = 0; 
+                
+                evaluated.forEach(c => {
+                    if (trendAgent !== 'All Agents' && c.agent !== trendAgent) return;
+                    const d = getLocalDateKey(c.date);
+                    if (!dailyData[d]) dailyData[d] = { totalScore: 0, count: 0 };
+                    dailyData[d].totalScore += qaData[c.id].score;
+                    dailyData[d].count++;
+                    if (dailyData[d].count > maxCount) maxCount = dailyData[d].count;
+                });
+
+                const sortedDates = Object.keys(dailyData).sort().slice(-7);
+                
+                return {
+                    dates: sortedDates,
+                    scores: sortedDates.map(d => dailyData[d].totalScore / dailyData[d].count),
+                    counts: sortedDates.map(d => dailyData[d].count),
+                    maxCount: maxCount
+                };
+            }, [filteredChats, qaData, trendAgent]);
+
+            // --- EXPORT ---
+            const exportCSV = () => {
+                const headers = ['Date', 'Agent', 'Chat ID', 'Score', 'Review Status', 'Critical Fail', 'Critical Reason', 'CSAT', ...Object.values(SCORECARD).flat().map(c => c.text)];
+                const rows = filteredChats.map(c => {
+                    const qa = qaData[c.id] || { score: 0, criteria: {}, criticalFail: 'None', criticalReason: '', status: 'Pending' };
+                    const survey = surveys[c.id] ? surveys[c.id][0]?.score : 'N/A';
+                    return [
+                        formatDate(c.date),
+                        c.agent,
+                        c.id,
+                        qa.score + '%',
+                        qa.status || 'AI',
+                        qa.criticalFail || 'None',
+                        qa.criticalReason || '',
+                        survey,
+                        ...Object.values(SCORECARD).flat().map(cri => qa.criteria[cri.id] || 'N/A')
+                    ];
+                });
+
+                const csv = Papa.unparse([headers, ...rows]);
+                const blob = new Blob([csv], { type: 'text/csv' });
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'Lenovo_QA_Report.csv';
+                a.click();
+            };
+
+            // --- VIEWS ---
+
+            if (view === 'upload') {
+                return (
+                    <div className="min-h-screen flex items-center justify-center relative overflow-hidden bg-slate-950">
+                        {/* FIX: Loading Overlay now uses VISIBILITY toggle instead of UNMOUNTING to prevent removeChild errors */}
+                        <LoadingOverlay progress={loadingProgress} message={loadingMessage} visible={isLoading} />
+                        
+                        {/* Lenovo-style ambient background */}
+                        <div className="absolute inset-0 bg-slate-950">
+                             <div className="absolute inset-0 bg-[url('https://grainy-gradients.vercel.app/noise.svg')] opacity-20"></div>
+                             <div className="absolute top-0 right-0 w-[500px] h-[500px] bg-lenovo-red/10 rounded-full blur-[100px] translate-x-1/2 -translate-y-1/2"></div>
+                             <div className="absolute bottom-0 left-0 w-[500px] h-[500px] bg-blue-600/10 rounded-full blur-[100px] -translate-x-1/2 translate-y-1/2"></div>
+                        </div>
+
+                        <div className="relative z-10 w-full max-w-4xl p-8">
+                            <div className="text-center mb-12">
+                                <div className="inline-flex mb-6 transform hover:scale-105 transition-transform duration-300">
+                                    <div className="bg-lenovo-red text-white px-6 py-2 text-4xl font-sans font-bold tracking-wider rounded-sm shadow-xl shadow-lenovo-red/20">
+                                        Lenovo
+                                    </div>
+                                </div>
+                                <h1 className="text-4xl font-light text-white tracking-tight">QA Manager <span className="font-bold text-lenovo-red">Pro</span></h1>
+                                <p className="text-slate-400 text-lg mt-3 font-light">Automated Intelligence for Quality Assurance</p>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                <div className="glass-panel p-8 rounded-2xl border border-slate-700 hover:border-lenovo-red/50 transition-all group cursor-pointer relative overflow-hidden">
+                                    <input type="file" multiple className="absolute inset-0 opacity-0 cursor-pointer z-20" onChange={(e) => handleFileUpload(e, 'chats')} />
+                                    <div className="relative z-10 flex flex-col items-center">
+                                        <div className="w-16 h-16 rounded-full bg-slate-800 flex items-center justify-center mb-4 group-hover:bg-lenovo-red transition-colors">
+                                            <Icon name="message-square" className="text-white" size={24} />
+                                        </div>
+                                        <h3 className="text-xl font-semibold text-white">Upload Chats</h3>
+                                        <p className="text-slate-500 text-sm mt-2 text-center">Drag & Drop CSV Logs</p>
+                                        {chats.length > 0 && <span className="mt-4 px-3 py-1 bg-emerald-500/20 text-emerald-400 text-xs rounded-full font-mono">{chats.length} Loaded</span>}
+                                    </div>
+                                </div>
+                                <div className="glass-panel p-8 rounded-2xl border border-slate-700 hover:border-blue-500/50 transition-all group cursor-pointer relative overflow-hidden">
+                                    <input type="file" className="absolute inset-0 opacity-0 cursor-pointer z-20" onChange={(e) => handleFileUpload(e, 'surveys')} />
+                                    <div className="relative z-10 flex flex-col items-center">
+                                        <div className="w-16 h-16 rounded-full bg-slate-800 flex items-center justify-center mb-4 group-hover:bg-blue-600 transition-colors">
+                                            <Icon name="file-bar-chart" className="text-white" size={24} />
+                                        </div>
+                                        <h3 className="text-xl font-semibold text-white">Link Surveys</h3>
+                                        <p className="text-slate-500 text-sm mt-2 text-center">Match via Chat ID</p>
+                                        {Object.keys(surveys).length > 0 && <span className="mt-4 px-3 py-1 bg-emerald-500/20 text-emerald-400 text-xs rounded-full font-mono">{Object.keys(surveys).length} Linked</span>}
+                                    </div>
+                                </div>
+                            </div>
+                            <button onClick={() => setView('workspace')} disabled={chats.length === 0} className={`mt-8 w-full py-4 rounded-xl font-bold text-lg transition-all flex items-center justify-center gap-2 ${chats.length > 0 ? 'bg-gradient-to-r from-lenovo-red to-lenovo-dark text-white shadow-xl shadow-lenovo-red/20 hover:scale-[1.01]' : 'bg-slate-800 text-slate-500 cursor-not-allowed'}`}>
+                                Enter Workspace <Icon name="arrow-right" />
+                            </button>
+                        </div>
+                    </div>
+                );
+            }
+
+            return (
+                <div className={`h-screen flex flex-col ${darkMode ? 'bg-slate-950' : 'bg-slate-100'} transition-colors`}>
+                    {/* FIX: Loading Overlay now uses VISIBILITY toggle instead of UNMOUNTING to prevent removeChild errors */}
+                    <LoadingOverlay progress={loadingProgress} message={loadingMessage} visible={isLoading} />
+                    
+                    <Modal isOpen={showCritInfo} onClose={() => setShowCritInfo(false)} title="Critical Failure Definitions">
+                        <div className="space-y-6">
+                            <div className="p-4 bg-slate-800 rounded-lg border border-slate-700">
+                                <div className="flex items-center gap-2 mb-2 text-red-400 font-bold">
+                                    <Icon name="alert-octagon" size={20} /> CX Critical
+                                </div>
+                                <p className="text-sm text-slate-300 mb-2 italic">Behaviors that damage brand reputation or insult the customer.</p>
+                                <ul className="list-disc list-inside text-xs text-slate-400 space-y-1 ml-2">
+                                    {CRITICAL_DEFINITIONS["CX Critical"].map(d => <li key={d}>{d}</li>)}
+                                </ul>
+                            </div>
+                            <div className="p-4 bg-slate-800 rounded-lg border border-slate-700">
+                                <div className="flex items-center gap-2 mb-2 text-amber-400 font-bold">
+                                    <Icon name="briefcase" size={20} /> Business Critical
+                                </div>
+                                <p className="text-sm text-slate-300 mb-2 italic">Actions that cause financial loss or violate sales policy.</p>
+                                <ul className="list-disc list-inside text-xs text-slate-400 space-y-1 ml-2">
+                                    {CRITICAL_DEFINITIONS["Business Critical"].map(d => <li key={d}>{d}</li>)}
+                                </ul>
+                            </div>
+                            <div className="p-4 bg-slate-800 rounded-lg border border-slate-700">
+                                <div className="flex items-center gap-2 mb-2 text-blue-400 font-bold">
+                                    <Icon name="shield-alert" size={20} /> Compliance Critical
+                                </div>
+                                <p className="text-sm text-slate-300 mb-2 italic">Breaches of law, data privacy, or security protocols.</p>
+                                <ul className="list-disc list-inside text-xs text-slate-400 space-y-1 ml-2">
+                                    {CRITICAL_DEFINITIONS["Compliance Critical"].map(d => <li key={d}>{d}</li>)}
+                                </ul>
+                            </div>
+                        </div>
+                    </Modal>
+
+                    {/* RED WARNING BAR IF STORAGE FAILS */}
+                    {storageError && (
+                        <div className="bg-red-600 text-white text-xs font-bold text-center py-2 px-4 shadow-lg flex items-center justify-center gap-2 relative z-50 animate-fade-in">
+                            <Icon name="alert-circle" size={14} />
+                            {storageError}
+                            <button onClick={() => setStorageError(null)} className="absolute right-4 hover:opacity-75"><Icon name="x" size={14} /></button>
+                        </div>
+                    )}
+
+                    <nav className={`h-16 border-b flex items-center justify-between px-6 z-30 ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+                        <div className="flex items-center gap-4">
+                            <div className="bg-lenovo-red text-white px-2 py-1 text-lg font-bold tracking-wider rounded-sm">Lenovo</div>
+                            <span className={`font-light text-lg ${darkMode ? 'text-white' : 'text-slate-800'}`}>QA Manager</span>
+                        </div>
+                        <div className="flex items-center gap-4">
+                            <button onClick={() => setDarkMode(!darkMode)} className="p-2 rounded-full hover:bg-slate-800 transition-colors text-slate-400">
+                                <Icon name={darkMode ? "sun" : "moon"} size={18} />
+                            </button>
+                        </div>
+                    </nav>
+
+                    <div className="flex-1 flex overflow-hidden">
+                        {/* SIDEBAR */}
+                        <aside className={`w-80 border-r flex flex-col z-20 ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+                            <div className="p-4 space-y-4 border-b border-slate-800">
+                                {/* Clear Data Button */}
+                                {chats.length > 0 && (
+                                    <button onClick={clearData} className="w-full py-2 border border-red-500/50 text-red-500 hover:bg-red-500/10 rounded-lg text-xs font-bold transition-colors flex items-center justify-center gap-2">
+                                        <Icon name="trash-2" size={12} /> Clear Saved Data
+                                    </button>
+                                )}
+                                <div className="space-y-2">
+                                    <label className="text-[10px] uppercase font-bold text-slate-500">Date Range</label>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <input type="date" className={`w-full rounded-lg px-2 py-1.5 text-xs border focus:outline-none focus:ring-1 focus:ring-lenovo-red ${darkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-300 text-slate-800'}`} onChange={e => setFilters(prev => ({...prev, startDate: e.target.value}))} />
+                                        <input type="date" className={`w-full rounded-lg px-2 py-1.5 text-xs border focus:outline-none focus:ring-1 focus:ring-lenovo-red ${darkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-50 border-slate-300 text-slate-800'}`} onChange={e => setFilters(prev => ({...prev, endDate: e.target.value}))} />
+                                    </div>
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-[10px] uppercase font-bold text-slate-500">Agents</label>
+                                    <div className={`max-h-32 overflow-y-auto rounded-lg border p-1 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-300'}`}>
+                                        {CORE_AGENTS.map(agent => (
+                                            <label key={agent} className="flex items-center gap-2 p-1.5 hover:bg-slate-700/50 rounded cursor-pointer">
+                                                <input type="checkbox" checked={filters.agents.has(agent)} onChange={() => {
+                                                    const newSet = new Set(filters.agents);
+                                                    if (newSet.has(agent)) newSet.delete(agent); else newSet.add(agent);
+                                                    setFilters(prev => ({...prev, agents: newSet}));
+                                                }} className="rounded border-slate-600 text-lenovo-red focus:ring-0" />
+                                                <span className={`text-xs ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>{agent}</span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                </div>
+                                <div className="flex flex-col gap-2">
+                                    <label className="text-[10px] uppercase font-bold text-slate-500">Actions</label>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <button onClick={() => generateDailySample(3)} className="py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-bold shadow-lg flex items-center justify-center gap-1">
+                                            <Icon name="dices" size={12} /> Sample 3
+                                        </button>
+                                        <button onClick={() => generateDailySample(5)} className="py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg text-xs font-bold shadow-lg flex items-center justify-center gap-1">
+                                            <Icon name="dices" size={12} /> Sample 5
+                                        </button>
+                                    </div>
+                                    <button onClick={runBatchAnalysisChunked} className="py-2 bg-lenovo-red hover:bg-lenovo-dark text-white rounded-lg text-xs font-bold shadow-lg shadow-red-900/20 flex items-center justify-center gap-1 w-full mt-1">
+                                        <Icon name="brain-circuit" size={12} /> Auto-Score All
+                                    </button>
+                                </div>
+                            </div>
+                            <div className="flex-1 overflow-y-auto">
+                                {filteredChats.slice(0, 100).map(chat => {
+                                    const data = qaData[chat.id];
+                                    const score = data?.score;
+                                    const critical = data?.criticalFail;
+                                    const isCrit = critical && critical !== "None";
+                                    const isReviewed = data?.status === 'Reviewed';
+
+                                    return (
+                                        <div key={chat.id} onClick={() => setSelectedChatId(chat.id)} className={`p-4 border-b cursor-pointer transition-all hover:pl-5 ${darkMode ? 'border-slate-800 hover:bg-slate-800' : 'border-slate-100 hover:bg-slate-50'} ${selectedChatId === chat.id ? 'border-l-4 border-l-lenovo-red bg-slate-800/50' : 'border-l-4 border-l-transparent'}`}>
+                                            <div className="flex justify-between items-start mb-1">
+                                                <div className="flex items-center gap-2">
+                                                    <span className={`font-medium text-sm ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>{chat.agent}</span>
+                                                    {isReviewed && <Icon name="check-circle" size={12} className="text-emerald-500" />}
+                                                </div>
+                                                {score !== undefined && (
+                                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isCrit ? 'bg-red-500/20 text-red-500' : score >= 85 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
+                                                        {score}%
+                                                    </span>
+                                                )}
+                                            </div>
+                                            <div className="flex justify-between items-end">
+                                                <div className="text-xs text-slate-500 font-mono">{formatDate(chat.date)}</div>
+                                                <div className="text-[10px] text-slate-600">#{chat.id.substring(0,6)}...</div>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                                {filteredChats.length > 100 && (
+                                    <div className="p-4 text-center text-xs text-slate-500 border-t border-slate-800">
+                                        Showing first 100 of {filteredChats.length} chats.<br/>
+                                        Use filters or date range to see specific records.
+                                    </div>
+                                )}
+                            </div>
+                        </aside>
+
+                        {/* MAIN WORKSPACE */}
+                        <main className="flex-1 overflow-y-auto relative p-6">
+                            {!selectedChatId && (
+                                <div className="max-w-6xl mx-auto space-y-6 animate-fade-in">
+                                    <header className="flex justify-between items-end mb-8">
+                                        <div>
+                                            <h2 className={`text-3xl font-bold ${darkMode ? 'text-white' : 'text-slate-800'}`}>Dashboard</h2>
+                                            <p className="text-slate-400">Analysis of {filteredChats.length} conversations</p>
+                                        </div>
+                                        {stats.totalEvaluated > 0 && <button onClick={exportCSV} className="px-4 py-2 bg-slate-800 text-white rounded-lg text-sm hover:bg-slate-700 flex items-center gap-2"><Icon name="download" size={14}/> Export CSV</button>}
+                                    </header>
+
+                                    {/* CRITICAL ALERTS SECTION */}
+                                    {stats.criticalQueue.length > 0 && (
+                                        <div className="mb-8 p-6 rounded-2xl bg-red-900/10 border border-red-500/30">
+                                            <div className="flex items-center gap-2 mb-4">
+                                                <div className="p-1.5 bg-red-500 rounded-lg text-white animate-pulse"><Icon name="siren" size={16}/></div>
+                                                <h3 className="text-lg font-bold text-red-500">Critical Alerts Queue</h3>
+                                                <span className="px-2 py-0.5 bg-red-500/20 text-red-400 rounded-full text-xs font-mono">{stats.criticalQueue.length} Chats</span>
+                                            </div>
+                                            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                                                {stats.criticalQueue.slice(0, 6).map(c => (
+                                                    <div key={c.id} className="bg-slate-900 border border-red-500/20 p-3 rounded-lg flex justify-between items-center group hover:border-red-500/50 transition-colors">
+                                                        <div>
+                                                            <div className="text-sm font-bold text-slate-200">{c.agent}</div>
+                                                            <div className="text-xs text-red-400 font-mono">Type: {qaData[c.id].criticalFail}</div>
+                                                        </div>
+                                                        <button onClick={() => setSelectedChatId(c.id)} className="px-3 py-1.5 bg-red-500/20 text-red-400 text-xs font-bold rounded hover:bg-red-500 hover:text-white transition-colors">Review</button>
+                                                    </div>
+                                                ))}
+                                                {stats.criticalQueue.length > 6 && (
+                                                    <div className="flex items-center justify-center text-xs text-slate-500">
+                                                        + {stats.criticalQueue.length - 6} more criticals
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    )}
+
+                                    {stats.totalEvaluated > 0 ? (
+                                        <>
+                                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                                <div className={`p-6 rounded-2xl border ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 shadow-sm'}`}>
+                                                    <div className="flex justify-between items-start mb-4">
+                                                        <div className="p-2 rounded-lg bg-blue-500/10 text-blue-500"><Icon name="activity" /></div>
+                                                        <span className="text-xs font-bold uppercase text-slate-500">Avg Score</span>
+                                                    </div>
+                                                    <div className={`text-4xl font-bold ${darkMode ? 'text-white' : 'text-slate-800'}`}>{stats.avgScore}%</div>
+                                                </div>
+                                                <div className={`p-6 rounded-2xl border ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 shadow-sm'}`}>
+                                                    <div className="flex justify-between items-start mb-4">
+                                                        <div className="p-2 rounded-lg bg-red-500/10 text-red-500"><Icon name="alert-triangle" /></div>
+                                                        <span className="text-xs font-bold uppercase text-slate-500">Critical Fails</span>
+                                                    </div>
+                                                    <div className={`text-4xl font-bold ${darkMode ? 'text-white' : 'text-slate-800'}`}>{stats.criticals}</div>
+                                                </div>
+                                                <div className={`p-6 rounded-2xl border ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 shadow-sm'}`}>
+                                                    <div className="flex justify-between items-start mb-4">
+                                                        <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-500"><Icon name="check-circle" /></div>
+                                                        <span className="text-xs font-bold uppercase text-slate-500">Analyzed</span>
+                                                    </div>
+                                                    <div className={`text-4xl font-bold ${darkMode ? 'text-white' : 'text-slate-800'}`}>{stats.totalEvaluated}</div>
+                                                </div>
+                                            </div>
+
+                                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                                                {/* TREND CHART */}
+                                                <div className={`p-6 rounded-2xl border ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 shadow-sm'}`}>
+                                                    <div className="flex justify-between items-center mb-4">
+                                                        <h3 className={`text-lg font-bold ${darkMode ? 'text-white' : 'text-slate-800'}`}>Score Trend & Volume</h3>
+                                                        <select 
+                                                            value={trendAgent} 
+                                                            onChange={(e) => setTrendAgent(e.target.value)}
+                                                            className={`text-xs p-1.5 rounded border ${darkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-slate-300 text-slate-800'}`}
+                                                        >
+                                                            <option>All Agents</option>
+                                                            {CORE_AGENTS.map(a => <option key={a}>{a}</option>)}
+                                                        </select>
+                                                    </div>
+                                                    <div className="h-64">
+                                                        <ChartComponent 
+                                                            type="bar"
+                                                            data={{
+                                                                labels: trendStats.dates,
+                                                                datasets: [
+                                                                    {
+                                                                        type: 'line',
+                                                                        label: 'Avg Score',
+                                                                        data: trendStats.scores,
+                                                                        borderColor: '#E2231A',
+                                                                        tension: 0.4,
+                                                                        yAxisID: 'y',
+                                                                        order: 1,
+                                                                        borderWidth: 2,
+                                                                        pointBackgroundColor: '#E2231A',
+                                                                        datalabels: { align: 'top', anchor: 'end', formatter: (v) => Math.round(v) + '%' }
+                                                                    },
+                                                                    {
+                                                                        type: 'bar',
+                                                                        label: 'Chats Analyzed',
+                                                                        data: trendStats.counts,
+                                                                        backgroundColor: darkMode ? 'rgba(148, 163, 184, 0.5)' : 'rgba(203, 213, 225, 0.8)',
+                                                                        yAxisID: 'y1',
+                                                                        order: 2,
+                                                                        borderRadius: 4,
+                                                                        barThickness: 20,
+                                                                        datalabels: { anchor: 'end', align: 'start', offset: -4, color: darkMode ? '#fff' : '#1e293b', font: { weight: 'bold', size: 11 }, formatter: (v) => v }
+                                                                    }
+                                                                ]
+                                                            }}
+                                                            options={{ 
+                                                                maintainAspectRatio: false, 
+                                                                plugins: { legend: { display: true, labels: { color: darkMode ? '#94a3b8' : '#475569', font: {size: 10} } } },
+                                                                scales: { 
+                                                                    y: { type: 'linear', display: true, position: 'left', min: 0, max: 100, title: { display: true, text: 'Score %', color: '#E2231A', font: {size: 10} }, grid: { color: darkMode ? 'rgba(255,255,255,0.05)' : 'rgba(0,0,0,0.05)' } },
+                                                                    y1: { type: 'linear', display: true, position: 'right', grid: { drawOnChartArea: false }, title: { display: true, text: 'Volume', color: '#64748b', font: {size: 10} }, ticks: { stepSize: 1 }, suggestedMax: (context) => trendStats.maxCount ? trendStats.maxCount * 2 : 10 },
+                                                                    x: { grid: { display: false } }
+                                                                } 
+                                                            }}
+                                                        />
+                                                    </div>
+                                                </div>
+
+                                                {/* NEW RADAR CHART */}
+                                                <div className={`p-6 rounded-2xl border ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 shadow-sm'}`}>
+                                                    <h3 className={`text-lg font-bold mb-4 ${darkMode ? 'text-white' : 'text-slate-800'}`}>Category Strengths</h3>
+                                                    <div className="h-64 flex justify-center">
+                                                        <ChartComponent 
+                                                            type="radar"
+                                                            data={{
+                                                                labels: Object.keys(stats.categoryScores),
+                                                                datasets: [{
+                                                                    label: 'Team Average',
+                                                                    data: Object.values(stats.categoryScores),
+                                                                    backgroundColor: 'rgba(59, 130, 246, 0.2)',
+                                                                    borderColor: '#3b82f6',
+                                                                    pointBackgroundColor: '#3b82f6',
+                                                                    pointBorderColor: '#fff',
+                                                                    pointHoverBackgroundColor: '#fff',
+                                                                    pointHoverBorderColor: '#3b82f6'
+                                                                }]
+                                                            }}
+                                                            options={{
+                                                                maintainAspectRatio: false,
+                                                                scales: {
+                                                                    r: {
+                                                                        angleLines: { color: darkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' },
+                                                                        grid: { color: darkMode ? 'rgba(255, 255, 255, 0.1)' : 'rgba(0, 0, 0, 0.1)' },
+                                                                        pointLabels: { color: darkMode ? '#cbd5e1' : '#475569', font: { size: 11, weight: 'bold' } },
+                                                                        ticks: { backdropColor: 'transparent', color: 'transparent', stepSize: 20 },
+                                                                        min: 0, max: 100
+                                                                    }
+                                                                },
+                                                                plugins: { 
+                                                                    legend: { display: false }, 
+                                                                    datalabels: { 
+                                                                        display: true, 
+                                                                        backgroundColor: darkMode ? 'rgba(30, 41, 59, 0.8)' : 'rgba(255, 255, 255, 0.9)',
+                                                                        borderRadius: 4,
+                                                                        borderWidth: 1,
+                                                                        borderColor: darkMode ? '#475569' : '#e2e8f0',
+                                                                        color: darkMode ? '#fff' : '#0f172a',
+                                                                        padding: 4,
+                                                                        formatter: (v) => v + '%'
+                                                                    } 
+                                                                }
+                                                            }}
+                                                        />
+                                                    </div>
+                                                </div>
+                                            </div>
+
+                                            {/* AGENT PERFORMANCE CHART */}
+                                            <div className={`p-6 rounded-2xl border ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 shadow-sm'} mt-6`}>
+                                                <h3 className={`text-lg font-bold mb-4 ${darkMode ? 'text-white' : 'text-slate-800'}`}>Agent Performance</h3>
+                                                <div className="h-64">
+                                                    <ChartComponent 
+                                                        type="bar"
+                                                        data={{
+                                                            labels: Object.keys(stats.agentStats),
+                                                            datasets: [{
+                                                                label: 'Avg Score',
+                                                                data: Object.values(stats.agentStats).map(s => Math.round(s.total / s.count)),
+                                                                backgroundColor: Object.values(stats.agentStats).map(s => (s.total/s.count) >= 85 ? '#10b981' : '#f59e0b'),
+                                                                borderRadius: 4,
+                                                                datalabels: {
+                                                                    anchor: 'end',
+                                                                    align: 'top',
+                                                                    formatter: (v) => v + '%'
+                                                                }
+                                                            }]
+                                                        }}
+                                                        options={{ maintainAspectRatio: false, plugins: { legend: {display: false} }, scales: { y: { min: 0, max: 100 } } }}
+                                                    />
+                                                </div>
+                                            </div>
+
+                                            <div className={`rounded-xl border overflow-hidden ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200 shadow-sm'} mt-6`}>
+                                                <table className="w-full text-sm text-left">
+                                                    <thead className={`text-xs uppercase ${darkMode ? 'bg-slate-800 text-slate-400' : 'bg-slate-50 text-slate-500'}`}>
+                                                        <tr>
+                                                            <th className="px-6 py-3">Agent</th>
+                                                            <th className="px-6 py-3">Audits</th>
+                                                            <th className="px-6 py-3">Avg Score</th>
+                                                            <th className="px-6 py-3">Criticals</th>
+                                                        </tr>
+                                                    </thead>
+                                                    <tbody className={darkMode ? 'text-slate-300' : 'text-slate-700'}>
+                                                        {Object.entries(stats.agentStats).map(([agent, data]) => (
+                                                            <tr key={agent} className={`border-b ${darkMode ? 'border-slate-800' : 'border-slate-100'}`}>
+                                                                <td className="px-6 py-4 font-medium">{agent}</td>
+                                                                <td className="px-6 py-4">{data.count}</td>
+                                                                <td className="px-6 py-4 font-bold">{(data.total/data.count).toFixed(0)}%</td>
+                                                                <td className="px-6 py-4 text-red-500">{data.criticals}</td>
+                                                            </tr>
+                                                        ))}
+                                                    </tbody>
+                                                </table>
+                                            </div>
+                                        </>
+                                    ) : (
+                                        <div className="flex flex-col items-center justify-center h-96 opacity-50">
+                                            <Icon name="bar-chart-2" size={48} className="mb-4 text-slate-600" />
+                                            <p>No analyzed data yet. Click "Auto-Score" in the sidebar.</p>
+                                        </div>
+                                    )}
+                                </div>
+                            )}
+
+                            {selectedChatId && (
+                                <div className={`absolute inset-0 z-50 flex ${darkMode ? 'bg-slate-950' : 'bg-slate-50'}`}>
+                                    <div className="flex-1 flex flex-col border-r border-slate-800">
+                                        <header className={`h-16 px-6 flex items-center justify-between border-b ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
+                                            <div className="flex items-center gap-4">
+                                                <button onClick={() => setSelectedChatId(null)} className="p-2 hover:bg-slate-700 rounded-lg text-slate-400"><Icon name="arrow-left" /></button>
+                                                <div>
+                                                    <div className="flex items-center gap-2">
+                                                        <h3 className={`font-bold ${darkMode ? 'text-white' : 'text-slate-800'}`}>{chats.find(c=>c.id===selectedChatId)?.agent}</h3>
+                                                        {qaData[selectedChatId]?.status === 'Reviewed' && <span className="text-[10px] font-bold bg-emerald-500/20 text-emerald-500 px-2 py-0.5 rounded border border-emerald-500/20">VERIFIED</span>}
+                                                    </div>
+                                                    <p className="text-xs text-slate-500">#{selectedChatId}</p>
+                                                </div>
+                                            </div>
+                                            {surveys[selectedChatId] && (
+                                                <div className="px-3 py-1 bg-purple-500/20 text-purple-400 rounded-lg text-xs font-bold border border-purple-500/30">
+                                                    CSAT: {surveys[selectedChatId][0].score}
+                                                </div>
+                                            )}
+                                        </header>
+                                        
+                                        <div className={`flex-1 overflow-y-auto p-6 space-y-4 ${darkMode ? 'bg-[#0B1120]' : 'bg-slate-100'}`}>
+                                            
+                                            {/* Survey Details Section */}
+                                            {surveys[selectedChatId] && (
+                                                <div className="mb-6 rounded-xl border border-purple-500/30 bg-purple-900/10 p-4">
+                                                    <h4 className="text-purple-400 font-bold text-sm mb-3 flex items-center gap-2">
+                                                        <Icon name="star" size={14} /> Survey Feedback
+                                                    </h4>
+                                                    <div className="space-y-3">
+                                                        {surveys[selectedChatId].map((q, idx) => (
+                                                            <div key={idx} className="bg-slate-900/50 p-3 rounded-lg border border-purple-500/10">
+                                                                <p className="text-xs text-slate-400 font-medium mb-1">{q.question}</p>
+                                                                <div className="flex justify-between items-center">
+                                                                    <p className="text-sm text-slate-200 italic">"{q.answer}"</p>
+                                                                    <span className="text-xs font-bold bg-purple-500/20 text-purple-400 px-2 py-0.5 rounded">Score: {q.score}</span>
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {chats.find(c=>c.id===selectedChatId)?.messages.map((msg, i) => (
+                                                <div key={i} className={`flex ${msg.type === 'agent' ? 'justify-end' : msg.type === 'system' ? 'justify-center' : 'justify-start'}`}>
+                                                    {msg.type === 'system' ? (
+                                                        <span className="text-[10px] bg-slate-800 text-slate-500 px-2 py-1 rounded-full uppercase tracking-wider">{msg.text}</span>
+                                                    ) : (
+                                                        <div className={`max-w-[80%] rounded-2xl p-4 text-sm ${
+                                                            msg.type === 'agent' ? 'bg-lenovo-red text-white rounded-br-none shadow-lg shadow-red-900/20' : 
+                                                            darkMode ? 'bg-slate-800 text-slate-200 rounded-bl-none' : 'bg-white text-slate-800 rounded-bl-none shadow-sm'
+                                                        }`}>
+                                                            <div className="mb-1 text-[10px] opacity-50 uppercase font-bold">{msg.sender}</div>
+                                                            {/* Highlighted Text Render */}
+                                                            <HighlightedText text={msg.text} />
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    {/* INTERACTIVE SCORECARD */}
+                                    <div className={`w-[450px] overflow-y-auto ${darkMode ? 'bg-slate-900' : 'bg-white'} border-l ${darkMode ? 'border-slate-800' : 'border-slate-200'} flex flex-col`}>
+                                        <div className="p-6 flex-1">
+                                            <div className="flex justify-between items-center mb-6">
+                                                <h3 className={`text-xl font-bold ${darkMode ? 'text-white' : 'text-slate-800'}`}>Scorecard</h3>
+                                                <div className={`text-3xl font-black ${
+                                                    (qaData[selectedChatId]?.criticalFail && qaData[selectedChatId]?.criticalFail !== "None") ? 'text-red-500' : 
+                                                    (qaData[selectedChatId]?.score || 0) >= 85 ? 'text-emerald-500' : 'text-amber-500'
+                                                }`}>
+                                                    {qaData[selectedChatId]?.score || 0}%
+                                                </div>
+                                            </div>
+
+                                            {/* Critical Failure Dropdown */}
+                                            <div className={`mb-6 p-4 rounded-xl border ${qaData[selectedChatId]?.criticalFail && qaData[selectedChatId]?.criticalFail !== "None" ? 'bg-red-500/10 border-red-500/30' : 'bg-slate-800/50 border-slate-700'}`}>
+                                                <div className="flex justify-between items-center mb-2">
+                                                    <label className="text-xs uppercase font-bold text-slate-500 block">Critical Failure Mode</label>
+                                                    <button onClick={() => setShowCritInfo(true)} className="text-blue-400 hover:text-white p-1"><Icon name="info" size={14}/></button>
+                                                </div>
+                                                <select 
+                                                    className="w-full bg-slate-900 border border-slate-700 text-slate-200 text-sm rounded-lg p-2 focus:ring-1 focus:ring-lenovo-red"
+                                                    value={qaData[selectedChatId]?.criticalFail || "None"}
+                                                    onChange={(e) => updateCritical(selectedChatId, e.target.value)}
+                                                >
+                                                    {CRITICAL_TYPES.map(type => <option key={type} value={type}>{type}</option>)}
+                                                </select>
+                                                {/* Critical Reason Display */}
+                                                {qaData[selectedChatId]?.criticalReason && (
+                                                    <div className="mt-2 p-2 bg-red-500/20 text-red-200 text-xs rounded border border-red-500/30">
+                                                        <strong>Why?</strong> {qaData[selectedChatId].criticalReason}
+                                                    </div>
+                                                )}
+                                            </div>
+
+                                            <div className="space-y-6 pb-20">
+                                                {Object.entries(SCORECARD).map(([cat, items]) => (
+                                                    <div key={cat}>
+                                                        <h4 className="text-xs font-bold uppercase text-slate-500 mb-3 border-b border-slate-800 pb-1">{cat}</h4>
+                                                        <div className="space-y-3">
+                                                            {items.map(item => {
+                                                                const val = qaData[selectedChatId]?.criteria[item.id] || 'N/A';
+                                                                return (
+                                                                    <div key={item.id} className={`p-3 rounded-lg border flex flex-col gap-3 ${darkMode ? 'bg-slate-800/50 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                                                                        <div className="flex justify-between">
+                                                                            <div>
+                                                                                <div className={`text-sm font-medium ${darkMode ? 'text-slate-300' : 'text-slate-700'}`}>{item.text}</div>
+                                                                                <div className="text-[10px] text-slate-500">{item.weight}%</div>
+                                                                            </div>
+                                                                        </div>
+                                                                        <div className="flex gap-1">
+                                                                            {['Yes', 'No', 'N/A'].map(opt => (
+                                                                                <button
+                                                                                    key={opt}
+                                                                                    onClick={() => updateCriterion(selectedChatId, item.id, opt)}
+                                                                                    className={`flex-1 py-1 text-[10px] font-bold rounded transition-colors ${
+                                                                                        val === opt 
+                                                                                            ? (opt === 'Yes' ? 'bg-emerald-500 text-white' : opt === 'No' ? 'bg-red-500 text-white' : 'bg-slate-600 text-white')
+                                                                                            : 'bg-slate-700/50 text-slate-400 hover:bg-slate-700'
+                                                                                    }`}
+                                                                                >
+                                                                                    {opt}
+                                                                                </button>
+                                                                            ))}
+                                                                        </div>
+                                                                    </div>
+                                                                );
+                                                            })}
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+
+                                        {/* SAVE FOOTER */}
+                                        <div className={`p-4 border-t ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} sticky bottom-0 z-10 flex gap-2`}>
+                                            <button 
+                                                onClick={() => resetReview(selectedChatId)}
+                                                className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-lg text-sm font-bold flex items-center justify-center gap-2"
+                                            >
+                                                <Icon name="refresh-ccw" size={16} /> Reset to AI
+                                            </button>
+                                            <button 
+                                                onClick={() => saveReview(selectedChatId)}
+                                                className="flex-[2] py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-bold shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-2"
+                                            >
+                                                <Icon name="check" size={16} /> Save & Finish Review
+                                            </button>
+                                        </div>
+                                    </div>
+                                </div>
+                            )}
+                        </main>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<ErrorBoundary><App /></ErrorBoundary>);
+    </script>
+</body>
+</html>
