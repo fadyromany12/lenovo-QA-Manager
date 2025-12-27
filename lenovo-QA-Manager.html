@@ -101,11 +101,64 @@
 
         // --- CONSTANTS & CONFIG ---
 
+        // ⚠️ ADMIN SETUP: Paste your Gemini API Key inside the quotes below to auto-load it for all users.
+        const DEFAULT_GEMINI_API_KEY = "AIzaSyBfe4UioV5Is_11MTXC_XCJ95NdNYlx55o"; 
+        const DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"; // Updated Default model
+
         const CORE_AGENTS = [
             "Amir Daniel", "Amr Ibrahim", "Rawan Essam", "Noura Aly", "Youssef Abdelshafy"
         ];
 
-        // --- WORKER CODE (Embedded) ---
+        // --- LAYER 4: AI PROMPT ARCHITECTURE ---
+        const AI_PROMPTS = {
+            system: `You are a Principal QA Analyst for Lenovo Support. Your goal is to evaluate customer service chat logs against a specific scorecard.
+You must be objective, identifying both specific failures and good behaviors.
+You prioritize:
+1. Active Listening (Did the agent actually answer the customer's specific question?)
+2. Process Adherence (Did they verify SN, ask for permission, etc?)
+3. Solution Accuracy (Did they provide the correct link/steps?)
+4. Tone (Was it professional yet empathetic?)
+
+You will be provided with:
+1. A Scorecard Definition (Criteria)
+2. A Chat Transcript (annotated with phases)
+3. Computed Risk Flags
+
+Output Format: JSON only. No markdown.
+Structure:
+{
+  "summary": "2-sentence summary of the interaction.",
+  "sentiment_trajectory": "Positive -> Neutral -> Negative",
+  "criteria_scores": {
+    "greet": "Yes/No/NA",
+    "discovery": "Yes/No/NA",
+    // ... maps to scorecard IDs
+  },
+  "reasoning": {
+    "greet": "Agent said 'Hello'",
+    "discovery": "Agent asked about the OS version and error message.",
+    // ... brief evidence for each score
+  },
+  "critical_fail": "None" or "CX Critical" or "Compliance Critical",
+  "critical_reason": "Explanation if critical fail",
+  "coaching_tip": "Specific actionable feedback for the agent."
+}`,
+            userTemplate: (chat, scorecard) => `
+CHAT CONTEXT:
+Agent: ${chat.agent}
+Date: ${chat.dateStr}
+Risk Flags: ${JSON.stringify(chat.flags)}
+Flow Issues: ${JSON.stringify(chat.flowFlags)}
+
+SCORECARD CRITERIA IDs (Use these keys for criteria_scores):
+${JSON.stringify(Object.values(scorecard).flat().map(i => ({id: i.id, text: i.text})))}
+
+TRANSCRIPT:
+${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join('\n')}
+`
+        };
+
+        // --- WORKER CODE (Embedded - Layer 2 Implemented + Tuned) ---
         const WORKER_CODE = `
         importScripts('https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js');
 
@@ -115,58 +168,125 @@
         
         const NEGATIVE_KEYWORDS = ['upset', 'angry', 'complaint', 'manager', 'fail', 'broken', 'slow', 'bad', 'wrong', 'ridiculous', 'waiting', 'waste', 'cancel', 'terrible', 'useless'];
 
+        // --- LAYER 1: DETERMINISTIC LOGIC (TUNED) ---
+        const INTENT_PATTERNS = {
+            greeting: ['hello', 'hi', 'morning', 'afternoon', 'evening', 'welcome', 'assist'],
+            closing: ['thank', 'bye', 'goodbye', 'help you with', 'anything else', 'wonderful day'],
+            question: ['?', 'what', 'how', 'when', 'why', 'where', 'may i', 'can i', 'could you'],
+            problem: ['not working', 'broken', 'issue', 'problem', 'fail', 'error', 'damage', 'slow', 'blue screen', 'boot', 'charge'],
+            instruction: ['click', 'link', 'visit', 'go to', 'steps', 'setting', 'select', 'press', 'type', 'enter'],
+            warranty: ['warranty', 'repair', 'onsite', 'depot', 'coverage', 'entitlement'],
+            empathy: ['sorry', 'apologize', 'understand', 'regret', 'frustrating'],
+            confirmation: ['yes', 'correct', 'ok', 'okay', 'sure', 'right', 'will do'],
+            data: ['serial', 'sn', 'email', 'phone', 'address', 'model', 'number']
+        };
+
+        const detectIntent = (text) => {
+            const lower = text.toLowerCase();
+            for (const [intent, keywords] of Object.entries(INTENT_PATTERNS)) {
+                if (intent === 'question' && lower.includes('?')) return 'Question';
+                if (keywords.some(k => lower.includes(k))) return intent.charAt(0).toUpperCase() + intent.slice(1);
+            }
+            return 'Statement';
+        };
+
+        const segmentPhases = (messages) => {
+            let phase = 'Opening';
+            const segmented = [];
+            
+            const closingIndices = new Set();
+            for (let i = messages.length - 1; i >= 0; i--) {
+                const intent = detectIntent(messages[i].text);
+                if (intent === 'Closing' || (i > messages.length - 4)) {
+                    closingIndices.add(i);
+                } else {
+                    break; 
+                }
+            }
+
+            for (let i = 0; i < messages.length; i++) {
+                const msg = messages[i];
+                const intent = detectIntent(msg.text);
+                
+                if (closingIndices.has(i)) {
+                    phase = 'Closing';
+                } else if (phase === 'Opening') {
+                    if (intent === 'Problem' || intent === 'Data' || (intent === 'Question' && i > 1) || i > 4) {
+                        phase = 'Discovery';
+                    }
+                } else if (phase === 'Discovery') {
+                    if (msg.type === 'agent' && (intent === 'Warranty' || (intent === 'Instruction' && msg.text.length > 100))) {
+                        phase = 'Resolution';
+                    }
+                }
+                segmented.push({ ...msg, intent, phase });
+            }
+            return segmented;
+        };
+
+        // --- LAYER 2: FLOW & BEHAVIOR ANALYSIS (TUNED) ---
+        const analyzeFlow = (messages) => {
+            let score = 100;
+            const flags = {
+                skippedDiscovery: false,
+                poorProbing: false,
+                rushedClosing: false,
+                escalation: false
+            };
+
+            const phases = new Set(messages.map(m => m.phase));
+            const agentDiscoveryMsgs = messages.filter(m => m.phase === 'Discovery' && m.type === 'agent');
+            const discoveryQuestions = agentDiscoveryMsgs.filter(m => m.intent === 'Question' || m.text.includes('?'));
+
+            if (messages.length > 10 && (!phases.has('Discovery') || agentDiscoveryMsgs.length < 1)) {
+                score -= 20;
+                flags.skippedDiscovery = true;
+            } else if (messages.length > 10 && discoveryQuestions.length < 2) {
+                score -= 10;
+                flags.poorProbing = true;
+            }
+
+            if (!phases.has('Closing')) {
+                score -= 10;
+                flags.rushedClosing = true;
+            }
+
+            const escalationKeywords = ['manager', 'supervisor', 'escalate', 'complaint', 'lawyer', 'sue'];
+            const customerMsgs = messages.filter(m => m.type === 'customer');
+            if (customerMsgs.some(m => escalationKeywords.some(k => m.text.toLowerCase().includes(k)))) {
+                score -= 20;
+                flags.escalation = true;
+            }
+
+            return { score: Math.max(0, score), flags };
+        };
+
         const parseDate = (dateStr) => {
             if (!dateStr || typeof dateStr !== 'string') return new Date(0);
             const cleanStr = dateStr.trim();
             const parts = cleanStr.split(/[\\/\\-\\s:TZ]/).filter(p => p !== ""); 
-            
             if (parts.length >= 3) {
                 let day, month, year, hours=0, minutes=0, seconds=0;
-
-                if (parts[2].length === 4) {
-                    day = parseInt(parts[0], 10);
-                    month = parseInt(parts[1], 10) - 1; 
-                    year = parseInt(parts[2], 10);
-                    if (parts.length >= 4) hours = parseInt(parts[3], 10);
-                    if (parts.length >= 5) minutes = parseInt(parts[4], 10);
-                    if (parts.length >= 6) seconds = parseInt(parts[5], 10);
-                    return new Date(year, month, day, hours, minutes, seconds);
-                }
-                
-                if (parts[0].length === 4) {
-                    year = parseInt(parts[0], 10);
-                    month = parseInt(parts[1], 10) - 1;
-                    day = parseInt(parts[2], 10);
-                    if (parts.length >= 4) hours = parseInt(parts[3], 10);
-                    if (parts.length >= 5) minutes = parseInt(parts[4], 10);
-                    if (parts.length >= 6) seconds = parseInt(parts[5], 10);
-                    return new Date(year, month, day, hours, minutes, seconds);
-                }
+                if (parts[2].length === 4) { day = parseInt(parts[0], 10); month = parseInt(parts[1], 10) - 1; year = parseInt(parts[2], 10); if (parts.length >= 4) hours = parseInt(parts[3], 10); if (parts.length >= 5) minutes = parseInt(parts[4], 10); if (parts.length >= 6) seconds = parseInt(parts[5], 10); return new Date(year, month, day, hours, minutes, seconds); }
+                if (parts[0].length === 4) { year = parseInt(parts[0], 10); month = parseInt(parts[1], 10) - 1; day = parseInt(parts[2], 10); if (parts.length >= 4) hours = parseInt(parts[3], 10); if (parts.length >= 5) minutes = parseInt(parts[4], 10); if (parts.length >= 6) seconds = parseInt(parts[5], 10); return new Date(year, month, day, hours, minutes, seconds); }
             }
-
             const d = new Date(dateStr);
             return isNaN(d.getTime()) ? new Date(0) : d;
         };
 
         self.onmessage = async (e) => {
             const { type, payload } = e.data;
-            
             if (type === 'PROCESS_CHATS') {
                 try {
                     const files = payload;
                     let combinedRows = [];
-                    
-                    // 1. Parse Files
                     for (let i = 0; i < files.length; i++) {
                         self.postMessage({ type: 'PROGRESS', value: Math.round((i / files.length) * 20), message: \`Reading file \${i + 1}/\${files.length}...\` });
                         const text = await files[i].text(); 
                         const result = Papa.parse(text, { header: true, skipEmptyLines: true });
                         combinedRows = combinedRows.concat(result.data);
                     }
-
                     self.postMessage({ type: 'PROGRESS', value: 25, message: \`Grouping \${combinedRows.length} rows...\` });
-
-                    // 2. Group
                     const groups = {};
                     combinedRows.forEach(row => {
                         const id = row.chatid || row['Chat ID'] || row.ConversationID;
@@ -174,94 +294,61 @@
                         if (!groups[id]) groups[id] = [];
                         groups[id].push(row);
                     });
-
                     const groupEntries = Object.entries(groups);
                     const totalChats = groupEntries.length;
                     const processedChats = [];
 
-                    // 3. Process & Sort & Analyze Risk
                     for (let i = 0; i < totalChats; i++) {
                         const [id, messages] = groupEntries[i];
-                        
-                        // Sorting
                         messages.sort((a, b) => new Date(a.date) - new Date(b.date));
-
-                        // Agent Logic
                         let agentName = "Unknown";
                         let date = parseDate(messages[0]?.date);
                         const formattedMsgs = [];
-                        
-                        const systemMsg = messages.find(m => 
-                            (m.from === 'System' || m.text.includes('System:')) && 
-                            (m.text.includes('Proactive chat started by') || m.text.includes('Ended by') || m.text.includes('Assigned to'))
-                        );
-
+                        const systemMsg = messages.find(m => (m.from === 'System' || m.text.includes('System:')) && (m.text.includes('Proactive chat started by') || m.text.includes('Ended by') || m.text.includes('Assigned to')));
                         if (systemMsg) {
                             const text = systemMsg.text;
                             const foundCore = CORE_AGENTS.find(a => text.includes(a));
                             if (foundCore) agentName = foundCore;
-                            else {
-                                const match = text.match(/by\\s+([A-Za-z\\s]+)/);
-                                if (match && match[1]) agentName = match[1].trim();
-                            }
+                            else { const match = text.match(/by\\s+([A-Za-z\\s]+)/); if (match && match[1]) agentName = match[1].trim(); }
                         }
-
                         if (agentName === "Unknown") {
                             const coreSender = messages.find(m => CORE_AGENTS.includes(m.from));
                             if (coreSender) agentName = coreSender.from;
                         }
-
                         messages.forEach(m => {
                             formattedMsgs.push({
                                 sender: m.from,
                                 text: m.text,
                                 time: m.date,
-                                type: CORE_AGENTS.includes(m.from) || m.from === agentName ? 'agent' : 
-                                      ['System', 'Bot', 'Lenovo Bot'].includes(m.from) ? 'system' : 'customer'
+                                type: CORE_AGENTS.includes(m.from) || m.from === agentName ? 'agent' : ['System', 'Bot', 'Lenovo Bot'].includes(m.from) ? 'system' : 'customer'
                             });
                         });
 
-                        // --- SMART SAMPLING (RISK) LOGIC ---
-                        const msgs = formattedMsgs;
+                        const enrichedMsgs = segmentPhases(formattedMsgs);
+                        const flowAnalysis = analyzeFlow(enrichedMsgs);
+
+                        const msgs = enrichedMsgs; 
                         let sentimentDrop = false;
                         let longDuration = false;
                         let silence = false;
                         let expired = false;
-
                         if (msgs.length > 1) {
-                            // 1. Duration
                             const startTime = parseDate(msgs[0].time).getTime();
                             const endTime = parseDate(msgs[msgs.length - 1].time).getTime();
                             const durationMinutes = (endTime - startTime) / 1000 / 60;
-                            
                             if (durationMinutes > 45) longDuration = true;
-
-                            // 2. Silence & Expired (Gap Analysis)
                             for (let j = 0; j < msgs.length - 1; j++) {
                                 const t1 = parseDate(msgs[j].time).getTime();
                                 const t2 = parseDate(msgs[j+1].time).getTime();
                                 const gapMin = (t2 - t1) / 1000 / 60;
-
-                                // Expired: No activity for 30+ mins
                                 if (gapMin > 30) expired = true;
-
-                                // Agent Silence: Customer Msg -> Agent Msg gap > 5 mins
-                                if (msgs[j].type === 'customer' && msgs[j+1].type === 'agent') {
-                                    if (gapMin > 5) silence = true;
-                                }
+                                if (msgs[j].type === 'customer' && msgs[j+1].type === 'agent') { if (gapMin > 5) silence = true; }
                             }
-
-                            // 3. Sentiment Drop (Last 20% of messages)
                             const cutOff = Math.floor(msgs.length * 0.8);
                             const lastPart = msgs.slice(cutOff);
                             const customerLastPart = lastPart.filter(m => m.type === 'customer');
-                            
-                            sentimentDrop = customerLastPart.some(m => 
-                                NEGATIVE_KEYWORDS.some(k => m.text.toLowerCase().includes(k))
-                            );
+                            sentimentDrop = customerLastPart.some(m => NEGATIVE_KEYWORDS.some(k => m.text.toLowerCase().includes(k)));
                         }
-
-                        // Calculate Risk Score (Simple weighted sum)
                         let riskScore = 0;
                         if (sentimentDrop) riskScore += 30;
                         if (expired) riskScore += 20;
@@ -272,27 +359,18 @@
                             id,
                             agent: agentName,
                             date: date, 
-                            messages: formattedMsgs,
+                            messages: enrichedMsgs, 
                             dateStr: messages[0]?.date,
                             riskScore,
-                            flags: {
-                                sentimentDrop,
-                                longDuration,
-                                silence,
-                                expired
-                            }
+                            flags: { sentimentDrop, longDuration, silence, expired },
+                            flowScore: flowAnalysis.score,
+                            flowFlags: flowAnalysis.flags
                         });
 
-                        if (i % 200 === 0) {
-                             self.postMessage({ type: 'PROGRESS', value: 25 + Math.round((i / totalChats) * 75), message: 'Processing & Analysing Risks...' });
-                        }
+                        if (i % 200 === 0) { self.postMessage({ type: 'PROGRESS', value: 25 + Math.round((i / totalChats) * 75), message: 'Processing Flow & Risks...' }); }
                     }
-
                     self.postMessage({ type: 'COMPLETE', data: processedChats });
-
-                } catch (err) {
-                    self.postMessage({ type: 'ERROR', message: err.message });
-                }
+                } catch (err) { self.postMessage({ type: 'ERROR', message: err.message }); }
             }
         };
         `;
@@ -422,34 +500,13 @@
 
         const parseDate = (dateStr) => {
             if (!dateStr || typeof dateStr !== 'string') return new Date(0);
-            
             const cleanStr = dateStr.trim();
             const parts = cleanStr.split(/[\/\-\s:TZ]/).filter(p => p !== ""); 
-            
             if (parts.length >= 3) {
                 let day, month, year, hours=0, minutes=0, seconds=0;
-
-                if (parts[2].length === 4) {
-                    day = parseInt(parts[0], 10);
-                    month = parseInt(parts[1], 10) - 1; 
-                    year = parseInt(parts[2], 10);
-                    if (parts.length >= 4) hours = parseInt(parts[3], 10);
-                    if (parts.length >= 5) minutes = parseInt(parts[4], 10);
-                    if (parts.length >= 6) seconds = parseInt(parts[5], 10);
-                    return new Date(year, month, day, hours, minutes, seconds);
-                }
-                
-                if (parts[0].length === 4) {
-                    year = parseInt(parts[0], 10);
-                    month = parseInt(parts[1], 10) - 1;
-                    day = parseInt(parts[2], 10);
-                    if (parts.length >= 4) hours = parseInt(parts[3], 10);
-                    if (parts.length >= 5) minutes = parseInt(parts[4], 10);
-                    if (parts.length >= 6) seconds = parseInt(parts[5], 10);
-                    return new Date(year, month, day, hours, minutes, seconds);
-                }
+                if (parts[2].length === 4) { day = parseInt(parts[0], 10); month = parseInt(parts[1], 10) - 1; year = parseInt(parts[2], 10); if (parts.length >= 4) hours = parseInt(parts[3], 10); if (parts.length >= 5) minutes = parseInt(parts[4], 10); if (parts.length >= 6) seconds = parseInt(parts[5], 10); return new Date(year, month, day, hours, minutes, seconds); }
+                if (parts[0].length === 4) { year = parseInt(parts[0], 10); month = parseInt(parts[1], 10) - 1; day = parseInt(parts[2], 10); if (parts.length >= 4) hours = parseInt(parts[3], 10); if (parts.length >= 5) minutes = parseInt(parts[4], 10); if (parts.length >= 6) seconds = parseInt(parts[5], 10); return new Date(year, month, day, hours, minutes, seconds); }
             }
-
             const d = new Date(dateStr);
             return isNaN(d.getTime()) ? new Date(0) : d;
         };
@@ -483,7 +540,9 @@
 
             useEffect(() => {
                 if (!canvasRef.current) return;
-                requestAnimationFrame(() => {
+                
+                let chartInstance = null;
+                const rafId = requestAnimationFrame(() => {
                     if (chartRef.current) {
                         chartRef.current.destroy();
                         chartRef.current = null;
@@ -501,9 +560,12 @@
                             }
                         }
                     };
-                    chartRef.current = new Chart(canvasRef.current, { type, data, options: finalOptions });
+                    chartInstance = new Chart(canvasRef.current, { type, data, options: finalOptions });
+                    chartRef.current = chartInstance;
                 });
+
                 return () => { 
+                    cancelAnimationFrame(rafId);
                     if (chartRef.current) {
                         chartRef.current.destroy(); 
                         chartRef.current = null;
@@ -622,6 +684,25 @@
             const [showHighRiskOnly, setShowHighRiskOnly] = useState(false);
             const [showTrendModal, setShowTrendModal] = useState(false);
             
+            // Layer 4 & 5 UI State
+            const [showAIPrompt, setShowAIPrompt] = useState(false);
+            const [generatedPrompt, setGeneratedPrompt] = useState('');
+            const [showSettings, setShowSettings] = useState(false);
+            const [showLogin, setShowLogin] = useState(false);
+            const [loginPassword, setLoginPassword] = useState('');
+            const [isAdmin, setIsAdmin] = useState(false);
+            
+            // UPDATED: Check for default key & model & proxy
+            const [apiKey, setApiKey] = useState(localStorage.getItem('lenovo_gemini_key') || DEFAULT_GEMINI_API_KEY || '');
+            const [apiModel, setApiModel] = useState(localStorage.getItem('lenovo_gemini_model') || DEFAULT_GEMINI_MODEL);
+            const [proxyUrl, setProxyUrl] = useState(localStorage.getItem('lenovo_proxy_url') || DEFAULT_PROXY_URL || '');
+            
+            // NEW: Custom Model Support
+            const [useCustomModel, setUseCustomModel] = useState(false);
+            const [customModelName, setCustomModelName] = useState('');
+
+            const [isAIProcessing, setIsAIProcessing] = useState(false);
+
             const [filters, setFilters] = useState({
                 startDate: '',
                 endDate: '',
@@ -755,12 +836,42 @@
                 }
             };
 
+            const saveSettings = () => {
+                localStorage.setItem('lenovo_gemini_key', apiKey);
+                localStorage.setItem('lenovo_proxy_url', proxyUrl); // Save Proxy
+                if (useCustomModel && customModelName) {
+                     localStorage.setItem('lenovo_gemini_model', customModelName);
+                     setApiModel(customModelName);
+                } else {
+                     localStorage.setItem('lenovo_gemini_model', apiModel);
+                }
+                setShowSettings(false);
+            };
+
+            const handleSettingsClick = () => {
+                if (isAdmin) {
+                    setShowSettings(true);
+                } else {
+                    setShowLogin(true);
+                }
+            };
+
+            const handleAdminLogin = () => {
+                if (loginPassword === ADMIN_PASSWORD) {
+                    setIsAdmin(true);
+                    setShowLogin(false);
+                    setShowSettings(true);
+                } else {
+                    alert("Incorrect Password");
+                }
+            };
+
             useEffect(() => {
                 document.documentElement.classList.toggle('dark', darkMode);
                 document.documentElement.classList.toggle('light', !darkMode);
             }, [darkMode]);
 
-            // --- LOGIC: PARSING & PROCESSING (Updated for Worker) ---
+            // --- LOGIC: PARSING & PROCESSING ---
 
             const handleFileUpload = (e, type) => {
                 const files = Array.from(e.target.files);
@@ -818,72 +929,101 @@
                 return totalW === 0 ? 0 : Math.round((earnedW / totalW) * 100);
             };
 
+            // Phase-Based Analysis (Logic/Fallback) -> Reverted to Global Search
             const analyzeChat = (chat) => {
                 const msgs = chat.messages;
-                const agentMsgs = msgs.filter(m => m.type === 'agent').map(m => m.text.toLowerCase());
-                const custMsgs = msgs.filter(m => m.type === 'customer').map(m => m.text.toLowerCase());
+                // Flattened analysis - scanning entire chat instead of specific phases
+                const allAgent = msgs.filter(m => m.type === 'agent');
                 
                 const criteria = {};
-                const flags = [];
                 let criticalFail = "None";
                 let criticalReason = "";
 
-                const has = (arr, kws) => {
-                    if (Array.isArray(arr)) return arr.some(txt => kws.some(k => txt.includes(k)));
-                    return kws.some(k => arr.includes(k));
-                };
+                // --- SCORING (GLOBAL SEARCH) ---
 
-                const findTrigger = (arr, kws) => {
-                    for (const txt of arr) {
-                        for (const k of kws) {
-                            if (txt.includes(k)) return k;
-                        }
-                    }
-                    return null;
-                };
+                // 1. OPENING
+                // Check first few messages for greeting
+                const hasGreeting = allAgent.slice(0, 3).some(m => m.intent === 'Greeting' || KEYWORDS.greetings.some(k => m.text.toLowerCase().includes(k)));
+                criteria.greet = hasGreeting ? 'Yes' : 'No';
+                criteria.confirm = 'Yes'; 
 
-                criteria.greet = has(agentMsgs.slice(0, 4), KEYWORDS.greetings) ? 'Yes' : 'No';
-                criteria.confirm = 'Yes';
-                criteria.listening = 'Yes';
-                criteria.clear = 'Yes';
+                // 2. COMMUNICATION
+                criteria.listening = 'Yes'; 
+                criteria.clear = 'Yes'; 
                 
-                const customerUpset = has(custMsgs, ['upset', 'angry', 'complaint', 'manager', 'fail', 'broken', 'slow', 'bad', 'wrong', 'ridiculous', 'waiting']);
-                if (customerUpset) {
-                    flags.push('Potential Friction');
-                    criteria.empathy = has(agentMsgs, KEYWORDS.empathy) ? 'Yes' : 'No';
+                if (chat.flags && chat.flags.sentimentDrop) {
+                    const hasEmpathy = allAgent.some(m => m.intent === 'Empathy' || KEYWORDS.empathy.some(k => m.text.toLowerCase().includes(k)));
+                    criteria.empathy = hasEmpathy ? 'Yes' : 'No';
                 } else {
                     criteria.empathy = 'N/A';
                 }
-                
+
                 criteria.tone = 'Yes';
-                criteria.hold = has(agentMsgs, KEYWORDS.hold) ? 'Yes' : 'N/A';
-                criteria.discovery = has(agentMsgs, KEYWORDS.discovery) ? 'Yes' : 'No';
+                
+                const hasHold = allAgent.some(m => KEYWORDS.hold.some(k => m.text.toLowerCase().includes(k)));
+                criteria.hold = hasHold ? 'Yes' : 'N/A';
+                if (hasHold) {
+                     criteria.hold = 'Yes';
+                }
+
+                // 3. SOLUTION / SALES
+                // Check entire conversation for questions
+                const discoveryQuestions = allAgent.filter(m => m.intent === 'Question' || m.text.includes('?'));
+                criteria.discovery = discoveryQuestions.length >= 2 ? 'Yes' : 'No';
+
                 criteria.product = 'Yes';
                 criteria.solution = 'Yes';
                 criteria.objection = 'Yes';
-                criteria.warranty = has(agentMsgs, [...KEYWORDS.warranty, ...KEYWORDS.accessories]) ? 'Yes' : 'No';
+
+                // Check entire conversation for warranty
+                const warrantyMentions = allAgent.some(m => 
+                    m.intent === 'Warranty' || KEYWORDS.warranty.some(k => m.text.toLowerCase().includes(k))
+                );
+                criteria.warranty = warrantyMentions ? 'Yes' : 'No';
+
+                // 4. PROCESS
                 criteria.next_steps = 'Yes';
                 criteria.compliance = 'Yes';
-                criteria.transfer = has(agentMsgs, ['transfer', 'connect', 'department', 'colleague']) ? 'Yes' : 'N/A';
-                criteria.disposition = 'Yes';
-                criteria.addressed = has(agentMsgs.slice(-5), KEYWORDS.closing) ? 'Yes' : 'No';
-                criteria.end_prof = has(agentMsgs.slice(-4), KEYWORDS.profClosing) ? 'Yes' : 'No';
-                criteria.csat = has(agentMsgs.slice(-4), KEYWORDS.csat) ? 'Yes' : 'No';
 
-                const cxTrigger = findTrigger(agentMsgs, KEYWORDS.cxCritical);
+                // 5. CLOSING
+                const isTransfer = allAgent.some(m => m.text.toLowerCase().includes('transfer') || m.text.toLowerCase().includes('connect you'));
+                criteria.transfer = isTransfer ? 'Yes' : 'N/A';
+
+                criteria.disposition = 'Yes';
+                
+                // Check last few messages for closing elements
+                const closingMsgs = allAgent.slice(-5);
+                
+                const closingIntent = closingMsgs.some(m => m.intent === 'Closing' || KEYWORDS.closing.some(k => m.text.toLowerCase().includes(k)));
+                criteria.addressed = closingIntent ? 'Yes' : 'No';
+                
+                criteria.end_prof = closingMsgs.some(m => KEYWORDS.profClosing.some(k => m.text.toLowerCase().includes(k))) ? 'Yes' : 'No';
+                criteria.csat = closingMsgs.some(m => KEYWORDS.csat.some(k => m.text.toLowerCase().includes(k))) ? 'Yes' : 'No';
+
+                // --- CRITICAL FAIL CHECKS ---
+                const cxTrigger = allAgent.some(m => KEYWORDS.cxCritical.some(k => m.text.toLowerCase().includes(k)));
                 if (cxTrigger) {
                     criticalFail = 'CX Critical';
-                    criticalReason = `Detected phrase: "${cxTrigger}"`;
+                    criticalReason = 'Detected forbidden vocabulary.';
                 }
 
-                const compTrigger = findTrigger(agentMsgs, KEYWORDS.compCritical);
+                const compTrigger = allAgent.some(m => KEYWORDS.compCritical.some(k => m.text.toLowerCase().includes(k)));
                 if (compTrigger) {
                     criticalFail = 'Compliance Critical';
-                    criticalReason = `Detected sensitive info: "${compTrigger}"`;
+                    criticalReason = 'Detected sensitive PII request.';
                 }
 
                 const score = calculateScore(criteria, criticalFail);
-                return { criteria, flags, score, criticalFail, criticalReason, status: 'AI' };
+
+                return { 
+                    criteria, 
+                    score, 
+                    criticalFail, 
+                    criticalReason, 
+                    status: 'AI',
+                    flags: chat.flags,
+                    flowScore: chat.flowScore
+                };
             };
 
             const runBatchAnalysisChunked = () => {
@@ -920,6 +1060,124 @@
                     }
                 };
                 setTimeout(analyzeNextChunk, 0);
+            };
+
+            // --- LAYER 5: REAL GEMINI INTEGRATION ---
+            const analyzeWithGemini = async (chatId) => {
+                // If proxy is set, priority use that
+                const useProxy = !!proxyUrl;
+
+                if (!useProxy && !apiKey) {
+                    handleSettingsClick(); // Replaced setShowSettings(true) to trigger login check if needed, though handleAutoScore handles that
+                    return;
+                }
+
+                const chat = chats.find(c => c.id === chatId);
+                if (!chat) return;
+
+                setIsAIProcessing(true);
+                const { system, user } = constructAIPayload(chat);
+                const modelToUse = (useCustomModel && customModelName) ? customModelName : (apiModel || DEFAULT_GEMINI_MODEL);
+
+                try {
+                    let response;
+                    let data;
+
+                    if (useProxy) {
+                         // PROXY PATH
+                         response = await fetch(proxyUrl, {
+                             method: 'POST',
+                             headers: { 'Content-Type': 'application/json' },
+                             body: JSON.stringify({ 
+                                 userPrompt: user, 
+                                 systemPrompt: system, 
+                                 model: modelToUse 
+                             })
+                         });
+                    } else {
+                        // DIRECT API PATH
+                        response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelToUse}:generateContent?key=${apiKey}`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                contents: [{ parts: [{ text: system + "\n\n" + user }] }],
+                                generationConfig: { responseMimeType: "application/json" }
+                            })
+                        });
+                    }
+
+                    if (!response.ok) {
+                        const err = await response.json().catch(() => ({}));
+                        const msg = err.error?.message || `API Error: ${response.status} ${response.statusText}`;
+                        
+                        if (msg.includes('location')) throw new Error('Gemini API is not available in your region/location.');
+                        if (msg.includes('API key')) throw new Error('Invalid API Key.');
+                        if (msg.includes('not found')) throw new Error(`Model '${modelToUse}' not found. Check settings.`);
+                        if (msg.includes('fetch')) throw new Error('Network Blocked. If using direct API, try the Proxy URL option in settings.');
+                        
+                        throw new Error(msg);
+                    }
+
+                    data = await response.json();
+                    
+                    // Safety check for candidates
+                    if (!data.candidates || data.candidates.length === 0) {
+                        throw new Error('AI returned no content. Safety filters may have blocked it.');
+                    }
+
+                    const text = data.candidates[0].content.parts[0].text;
+                    const jsonResult = JSON.parse(text);
+
+                    // Update State with AI Data (Human-in-the-Loop: Status = 'AI_PROPOSED')
+                    const newScore = calculateScore(jsonResult.criteria_scores, jsonResult.critical_fail);
+                    
+                    setQaData(prev => ({
+                        ...prev,
+                        [chatId]: {
+                            ...prev[chatId],
+                            criteria: jsonResult.criteria_scores,
+                            score: newScore,
+                            criticalFail: jsonResult.critical_fail,
+                            criticalReason: jsonResult.critical_reason,
+                            aiReasoning: jsonResult.reasoning, 
+                            summary: jsonResult.summary,
+                            coaching: jsonResult.coaching_tip,
+                            status: 'AI_PROPOSED' // Yellow Flag
+                        }
+                    }));
+
+                } catch (e) {
+                    console.error("AI Error", e);
+                    if (e.message === 'Failed to fetch') {
+                        alert(`AI Analysis Failed: Network Error.\n\n1. Check internet.\n2. Google APIs might be blocked by your network.\n3. Try setting up the Cloudflare Proxy (Option 1).`);
+                    } else {
+                        alert("AI Analysis Failed: " + e.message);
+                    }
+                } finally {
+                    setIsAIProcessing(false);
+                }
+            };
+
+            const constructAIPayload = (chat) => {
+                const system = AI_PROMPTS.system;
+                const user = AI_PROMPTS.userTemplate(chat, SCORECARD);
+                return { system, user };
+            };
+
+            const handleAutoScore = (chatId) => {
+                if (apiKey || proxyUrl) {
+                    analyzeWithGemini(chatId);
+                } else {
+                    handleSettingsClick(); // Ensure auth check happens
+                }
+            };
+
+            const handleOpenAIPrompt = (chatId) => {
+                const chat = chats.find(c => c.id === chatId);
+                if (!chat) return;
+                const { system, user } = constructAIPayload(chat);
+                setGeneratedPrompt(`=== SYSTEM PROMPT ===\n${system}\n\n=== USER PROMPT ===\n${user}`);
+                setShowAIPrompt(true);
             };
 
             const updateCriterion = (chatId, criterionId, value) => {
@@ -1076,7 +1334,6 @@
                     if (dailyData[d].count > maxCount) maxCount = dailyData[d].count;
                 });
 
-                // STEP 5 FIX: Removed .slice(-7) to show full range
                 const sortedDates = Object.keys(dailyData).sort();
                 return {
                     dates: sortedDates,
@@ -1200,6 +1457,24 @@
                         </div>
                     </Modal>
 
+                    {/* NEW: Admin Login Modal */}
+                    <Modal isOpen={showLogin} onClose={() => setShowLogin(false)} title="Admin Access Required" maxWidth="max-w-sm">
+                         <div className="space-y-4">
+                            <p className="text-sm text-slate-400">Settings are protected. Please enter the admin password to continue.</p>
+                            <input 
+                                type="password" 
+                                value={loginPassword} 
+                                onChange={(e) => setLoginPassword(e.target.value)} 
+                                onKeyDown={(e) => e.key === 'Enter' && handleAdminLogin()}
+                                className="w-full bg-slate-800 border border-slate-700 text-white rounded p-2 focus:ring-2 focus:ring-lenovo-red outline-none"
+                                placeholder="Password"
+                            />
+                            <div className="flex justify-end pt-4">
+                                <button onClick={handleAdminLogin} className="px-4 py-2 bg-lenovo-red text-white rounded font-bold hover:bg-red-700">Login</button>
+                            </div>
+                        </div>
+                    </Modal>
+
                     {/* NEW: Full Trend Modal */}
                     <Modal isOpen={showTrendModal} onClose={() => setShowTrendModal(false)} title="Full Historical Trend" maxWidth="max-w-6xl">
                         <div className="h-[60vh] w-full">
@@ -1246,6 +1521,100 @@
                         </div>
                     </Modal>
 
+                    {/* NEW: AI Prompt Preview Modal */}
+                    <Modal isOpen={showAIPrompt} onClose={() => setShowAIPrompt(false)} title="AI Prompt Preview (Layer 4)" maxWidth="max-w-4xl">
+                        <div className="flex flex-col h-[60vh]">
+                            <div className="bg-slate-800 p-4 rounded-lg border border-slate-700 mb-4 flex-1 overflow-auto">
+                                <pre className="text-xs text-green-400 font-mono whitespace-pre-wrap">{generatedPrompt}</pre>
+                            </div>
+                            <div className="flex justify-between items-center text-xs text-slate-500">
+                                <span>This is the exact payload that will be sent to the LLM in Layer 5.</span>
+                                <button className="px-4 py-2 bg-slate-700 text-white rounded hover:bg-slate-600" onClick={() => navigator.clipboard.writeText(generatedPrompt)}>Copy to Clipboard</button>
+                            </div>
+                        </div>
+                    </Modal>
+
+                    {/* NEW: Settings Modal */}
+                    <Modal isOpen={showSettings} onClose={() => setShowSettings(false)} title="Settings" maxWidth="max-w-md">
+                        <div className="space-y-4">
+                            <div>
+                                <label className="block text-sm font-bold text-slate-400 mb-2">Gemini API Key</label>
+                                <input 
+                                    type="password" 
+                                    value={apiKey} 
+                                    onChange={(e) => setApiKey(e.target.value)} 
+                                    className="w-full bg-slate-800 border border-slate-700 text-white rounded p-2 focus:ring-2 focus:ring-lenovo-red outline-none"
+                                    placeholder="Enter your API Key"
+                                />
+                                <p className="text-[10px] text-slate-500 mt-2">
+                                    Your key is stored locally in your browser. To set for everyone, update the HTML source code.
+                                </p>
+                            </div>
+                            
+                            {/* NEW: Cloudflare Proxy Input */}
+                            <div>
+                                <label className="block text-sm font-bold text-slate-400 mb-2">Cloudflare Proxy URL (Recommended)</label>
+                                <input 
+                                    type="text" 
+                                    value={proxyUrl} 
+                                    onChange={(e) => setProxyUrl(e.target.value)} 
+                                    className="w-full bg-slate-800 border border-slate-700 text-white rounded p-2 focus:ring-2 focus:ring-lenovo-red outline-none"
+                                    placeholder="https://your-worker-name.workers.dev"
+                                />
+                                <p className="text-[10px] text-slate-500 mt-2">
+                                    Paste your Cloudflare Worker URL here to fix "Network Error" and CORS issues.
+                                </p>
+                            </div>
+
+                            {/* New: Model Selector */}
+                            <div>
+                                <label className="block text-sm font-bold text-slate-400 mb-2">Gemini Model</label>
+                                <div className="space-y-2">
+                                    <div className="flex gap-2">
+                                        <button 
+                                            className={`px-3 py-1.5 rounded text-xs border ${!useCustomModel ? 'bg-lenovo-red text-white border-lenovo-red' : 'bg-slate-800 border-slate-600 text-slate-300'}`}
+                                            onClick={() => setUseCustomModel(false)}
+                                        >
+                                            Standard List
+                                        </button>
+                                        <button 
+                                            className={`px-3 py-1.5 rounded text-xs border ${useCustomModel ? 'bg-lenovo-red text-white border-lenovo-red' : 'bg-slate-800 border-slate-600 text-slate-300'}`}
+                                            onClick={() => setUseCustomModel(true)}
+                                        >
+                                            Custom Model Name
+                                        </button>
+                                    </div>
+
+                                    {!useCustomModel ? (
+                                        <select 
+                                            value={apiModel} 
+                                            onChange={(e) => setApiModel(e.target.value)}
+                                            className="w-full bg-slate-800 border border-slate-700 text-white rounded p-2 focus:ring-2 focus:ring-lenovo-red outline-none"
+                                        >
+                                            <option value="gemini-2.5-flash">Gemini 2.5 Flash (New)</option>
+                                            <option value="gemini-1.5-flash-001">Gemini 1.5 Flash (Stable)</option>
+                                            <option value="gemini-1.5-flash">Gemini 1.5 Flash (Alias)</option>
+                                            <option value="gemini-1.5-flash-8b">Gemini 1.5 Flash-8b</option>
+                                            <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
+                                            <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash Exp</option>
+                                        </select>
+                                    ) : (
+                                        <input 
+                                            type="text" 
+                                            value={customModelName} 
+                                            onChange={(e) => setCustomModelName(e.target.value)} 
+                                            className="w-full bg-slate-800 border border-slate-700 text-white rounded p-2 focus:ring-2 focus:ring-lenovo-red outline-none"
+                                            placeholder="e.g. gemini-2.5-flash"
+                                        />
+                                    )}
+                                </div>
+                            </div>
+                            <div className="flex justify-end pt-4">
+                                <button onClick={saveSettings} className="px-4 py-2 bg-lenovo-red text-white rounded font-bold hover:bg-red-700">Save Settings</button>
+                            </div>
+                        </div>
+                    </Modal>
+
                     {storageError && (
                         <div className="bg-red-600 text-white text-xs font-bold text-center py-2 px-4 shadow-lg flex items-center justify-center gap-2 relative z-50 animate-fade-in">
                             <Icon name="alert-circle" size={14} />
@@ -1260,6 +1629,9 @@
                             <span className={`font-light text-lg ${darkMode ? 'text-white' : 'text-slate-800'}`}>QA Manager</span>
                         </div>
                         <div className="flex items-center gap-4">
+                            <button onClick={() => handleSettingsClick()} className="p-2 rounded-full hover:bg-slate-800 transition-colors text-slate-400" title="Settings">
+                                <Icon name="settings" size={18} />
+                            </button>
                             <button onClick={() => setDarkMode(!darkMode)} className="p-2 rounded-full hover:bg-slate-800 transition-colors text-slate-400">
                                 <Icon name={darkMode ? "sun" : "moon"} size={18} />
                             </button>
@@ -1330,6 +1702,7 @@
                                     const critical = data?.criticalFail;
                                     const isCrit = critical && critical !== "None";
                                     const isReviewed = data?.status === 'Reviewed';
+                                    const isAIProposed = data?.status === 'AI_PROPOSED';
                                     const isHighRisk = chat.riskScore > 0;
 
                                     return (
@@ -1339,9 +1712,10 @@
                                                     {isHighRisk && <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse"></div>}
                                                     <span className={`font-medium text-sm ${darkMode ? 'text-slate-200' : 'text-slate-800'}`}>{chat.agent}</span>
                                                     {isReviewed && <Icon name="check-circle" size={12} className="text-emerald-500" />}
+                                                    {isAIProposed && <Icon name="sparkles" size={12} className="text-indigo-400" />}
                                                 </div>
                                                 {score !== undefined && (
-                                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isCrit ? 'bg-red-500/20 text-red-500' : score >= 85 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
+                                                    <span className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isCrit ? 'bg-red-500/20 text-red-500' : isAIProposed ? 'bg-indigo-500/20 text-indigo-400' : score >= 85 ? 'bg-emerald-500/20 text-emerald-400' : 'bg-amber-500/20 text-amber-400'}`}>
                                                         {score}%
                                                     </span>
                                                 )}
@@ -1591,6 +1965,8 @@
                                                     <div className="flex items-center gap-2">
                                                         <h3 className={`font-bold ${darkMode ? 'text-white' : 'text-slate-800'}`}>{chats.find(c=>c.id===selectedChatId)?.agent}</h3>
                                                         {qaData[selectedChatId]?.status === 'Reviewed' && <span className="text-[10px] font-bold bg-emerald-500/20 text-emerald-500 px-2 py-0.5 rounded border border-emerald-500/20">VERIFIED</span>}
+                                                        {qaData[selectedChatId]?.status === 'AI_PROPOSED' && <span className="text-[10px] font-bold bg-indigo-500/20 text-indigo-400 px-2 py-0.5 rounded border border-indigo-500/20 animate-pulse">AI PROPOSED</span>}
+                                                        
                                                         {chats.find(c=>c.id===selectedChatId)?.flags?.expired && (
                                                             <span className="px-2 py-0.5 bg-red-500/20 text-red-500 text-[10px] font-bold uppercase rounded border border-red-500/20 flex items-center gap-1">
                                                                 <Icon name="clock" size={10}/> EXPIRED
@@ -1605,14 +1981,43 @@
                                                     <p className="text-xs text-slate-500">#{selectedChatId}</p>
                                                 </div>
                                             </div>
-                                            {surveys[selectedChatId] && (
-                                                <div className="px-3 py-1 bg-purple-500/20 text-purple-400 rounded-lg text-xs font-bold border border-purple-500/30">
-                                                    CSAT: {surveys[selectedChatId][0].score}
-                                                </div>
-                                            )}
+                                            <div className="flex flex-col items-end">
+                                                {(() => {
+                                                    const chat = chats.find(c=>c.id===selectedChatId);
+                                                    if(!chat?.flowScore) return null;
+                                                    return (
+                                                        <>
+                                                            <div className={`text-lg font-bold flex items-center gap-1 ${chat.flowScore < 70 ? 'text-red-500' : 'text-emerald-500'}`}>
+                                                                <Icon name="activity" size={16}/> {chat.flowScore} Flow
+                                                            </div>
+                                                            <div className="flex gap-1 mt-0.5">
+                                                                {chat.flowFlags?.skippedDiscovery && <span className="text-[9px] bg-red-500/20 text-red-400 px-1 rounded uppercase font-bold border border-red-500/30">Skip Discovery</span>}
+                                                                {chat.flowFlags?.poorProbing && <span className="text-[9px] bg-amber-500/20 text-amber-400 px-1 rounded uppercase font-bold border border-amber-500/30">Poor Probing</span>}
+                                                                {chat.flowFlags?.rushedClosing && <span className="text-[9px] bg-blue-500/20 text-blue-400 px-1 rounded uppercase font-bold border border-blue-500/30">Rushed Close</span>}
+                                                                {chat.flowFlags?.escalation && <span className="text-[9px] bg-red-600/30 text-red-200 px-1 rounded uppercase font-bold border border-red-600/50">Escalation</span>}
+                                                            </div>
+                                                        </>
+                                                    );
+                                                })()}
+                                            </div>
                                         </header>
                                         
                                         <div className={`flex-1 overflow-y-auto p-6 space-y-4 ${darkMode ? 'bg-[#0B1120]' : 'bg-slate-100'}`}>
+                                            {/* AI Summary Section */}
+                                            {qaData[selectedChatId]?.summary && (
+                                                <div className="mb-4 bg-indigo-900/20 border border-indigo-500/30 p-4 rounded-xl">
+                                                    <div className="flex items-center gap-2 mb-2 text-indigo-400 font-bold text-sm">
+                                                        <Icon name="bot" size={16}/> AI Analysis
+                                                    </div>
+                                                    <p className="text-sm text-slate-300 italic mb-2">"{qaData[selectedChatId].summary}"</p>
+                                                    {qaData[selectedChatId].coaching && (
+                                                        <div className="mt-2 text-xs bg-indigo-500/10 p-2 rounded text-indigo-300 border border-indigo-500/20">
+                                                            <strong>💡 Coaching Tip:</strong> {qaData[selectedChatId].coaching}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+
                                             {surveys[selectedChatId] && (
                                                 <div className="mb-6 rounded-xl border border-purple-500/30 bg-purple-900/10 p-4">
                                                     <h4 className="text-purple-400 font-bold text-sm mb-3 flex items-center gap-2">
@@ -1643,7 +2048,11 @@
                                                         }`}>
                                                             <div className="mb-1 text-[10px] opacity-50 uppercase font-bold flex justify-between gap-4">
                                                                 <span>{msg.sender}</span>
-                                                                <span>{formatTime(msg.time)}</span>
+                                                                <div className="flex gap-2">
+                                                                    {msg.phase && <span className="opacity-70">{msg.phase}</span>}
+                                                                    {msg.intent && <span className="opacity-50">• {msg.intent}</span>}
+                                                                    <span>{formatTime(msg.time)}</span>
+                                                                </div>
                                                             </div>
                                                             <HighlightedText text={msg.text} />
                                                         </div>
@@ -1691,6 +2100,8 @@
                                                         <div className="space-y-3">
                                                             {items.map(item => {
                                                                 const val = qaData[selectedChatId]?.criteria[item.id] || 'N/A';
+                                                                const aiReason = qaData[selectedChatId]?.aiReasoning?.[item.id];
+                                                                
                                                                 return (
                                                                     <div key={item.id} className={`p-3 rounded-lg border flex flex-col gap-3 ${darkMode ? 'bg-slate-800/50 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
                                                                         <div className="flex justify-between">
@@ -1714,6 +2125,12 @@
                                                                                 </button>
                                                                             ))}
                                                                         </div>
+                                                                        {/* AI Reasoning Tooltip/Text */}
+                                                                        {aiReason && qaData[selectedChatId]?.status === 'AI_PROPOSED' && (
+                                                                            <div className="text-[10px] text-indigo-300 bg-indigo-500/10 p-1.5 rounded border border-indigo-500/20 italic">
+                                                                                🤖 {aiReason}
+                                                                            </div>
+                                                                        )}
                                                                     </div>
                                                                 );
                                                             })}
@@ -1725,16 +2142,31 @@
 
                                         <div className={`p-4 border-t ${darkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'} sticky bottom-0 z-10 flex gap-2`}>
                                             <button 
-                                                onClick={() => resetReview(selectedChatId)}
-                                                className="flex-1 py-3 bg-slate-800 hover:bg-slate-700 text-slate-400 rounded-lg text-sm font-bold flex items-center justify-center gap-2"
+                                                onClick={() => handleAutoScore(selectedChatId)}
+                                                disabled={isAIProcessing}
+                                                className={`flex-[2] py-3 rounded-lg text-sm font-bold shadow-lg flex items-center justify-center gap-2 transition-all ${
+                                                    apiKey 
+                                                    ? 'bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-900/20' 
+                                                    : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
+                                                }`}
                                             >
-                                                <Icon name="refresh-ccw" size={16} /> Reset to AI
+                                                {isAIProcessing ? (
+                                                    <>
+                                                        <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                                        Analyzing...
+                                                    </>
+                                                ) : (
+                                                    <>
+                                                        <Icon name={apiKey ? "sparkles" : "key"} size={16} /> 
+                                                        {apiKey ? "Auto-Score with AI" : "Enter API Key"}
+                                                    </>
+                                                )}
                                             </button>
                                             <button 
                                                 onClick={() => saveReview(selectedChatId)}
-                                                className="flex-[2] py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-bold shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-2"
+                                                className="flex-1 py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-bold shadow-lg shadow-emerald-900/20 flex items-center justify-center gap-2"
                                             >
-                                                <Icon name="check" size={16} /> Save & Finish Review
+                                                <Icon name="check" size={16} /> Save
                                             </button>
                                         </div>
                                     </div>
