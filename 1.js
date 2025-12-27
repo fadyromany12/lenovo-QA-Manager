@@ -1,51 +1,49 @@
 export default {
   async fetch(request, env) {
-    // 1. Handle CORS (Allow your Google Site to talk to this worker)
+    // --- 1. DEFINITIVE CORS HEADERS (Allow Everything) ---
+    const corsHeaders = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, HEAD, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "*", // Allow any header the browser wants to send
+    };
+
+    // --- 2. HANDLE PREFLIGHT (Browser Security Check) ---
     if (request.method === "OPTIONS") {
       return new Response(null, {
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type",
-        },
+        status: 204, // No Content
+        headers: corsHeaders,
       });
     }
 
+    // --- 3. HANDLE ACTUAL REQUEST ---
     if (request.method !== "POST") {
-      return new Response("Method Not Allowed", { status: 405 });
+      return new Response("Method Not Allowed", { status: 405, headers: corsHeaders });
     }
 
     try {
-      // 2. Parse the incoming request from your App
       const { userPrompt, systemPrompt, model } = await request.json();
       
-      // Default to 1.5 Flash if not specified
-      const targetModel = model || "gemini-1.5-flash"; 
-      const apiKey = env.GEMINI_API_KEY;
+      // Check API Key
+      const apiKey = env.GEMINI_API_KEY; 
+      // FALLBACK: If you forgot to set the var in Cloudflare, hardcode it here for testing:
+      // const apiKey = "YOUR_KEY_HERE"; 
 
       if (!apiKey) {
-        return new Response(JSON.stringify({ error: "Server configuration error: No API Key set." }), {
-          status: 500,
-          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
-        });
+        throw new Error("Server Configuration Error: GEMINI_API_KEY is missing in Cloudflare Variables.");
       }
 
-      // 3. Forward to Google Gemini API
-      // We use the specific endpoint that supports System Instructions and JSON Schema
+      const targetModel = model || "gemini-1.5-flash"; 
+      
+      // Call Google
       const googleUrl = `https://generativelanguage.googleapis.com/v1beta/models/${targetModel}:generateContent?key=${apiKey}`;
-
+      
       const payload = {
         contents: [{ parts: [{ text: userPrompt }] }],
-        generationConfig: {
-          response_mime_type: "application/json" // CRITICAL for your app's parsing
-        }
+        generationConfig: { response_mime_type: "application/json" }
       };
 
-      // Add System Instruction if provided
       if (systemPrompt) {
-        payload.systemInstruction = {
-          parts: [{ text: systemPrompt }]
-        };
+        payload.systemInstruction = { parts: [{ text: systemPrompt }] };
       }
 
       const googleResponse = await fetch(googleUrl, {
@@ -56,18 +54,22 @@ export default {
 
       const data = await googleResponse.json();
 
-      // 4. Return Google's response back to your App
+      // Return Result with CORS Headers
       return new Response(JSON.stringify(data), {
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": "*" // CORS Header
+        status: googleResponse.status,
+        headers: { 
+          ...corsHeaders,
+          "Content-Type": "application/json"
         }
       });
 
     } catch (error) {
       return new Response(JSON.stringify({ error: error.message }), {
         status: 500,
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+        headers: { 
+          ...corsHeaders,
+          "Content-Type": "application/json"
+        }
       });
     }
   }
