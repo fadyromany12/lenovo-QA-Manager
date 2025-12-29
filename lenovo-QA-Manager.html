@@ -102,47 +102,52 @@
         // --- CONSTANTS & CONFIG ---
 
         // ⚠️ ADMIN SETUP: Paste your Gemini API Key inside the quotes below to auto-load it for all users.
-        const DEFAULT_GEMINI_API_KEY = "AIzaSyBfe4UioV5Is_11MTXC_XCJ95NdNYlx55o"; 
+        const DEFAULT_GEMINI_API_KEY = ""; 
         const DEFAULT_GEMINI_MODEL = "gemini-flash-latest"; // Updated Default model
-        const ADMIN_PASSWORD = "faddy1112"; // Set your desired password here
+        const ADMIN_PASSWORD = ""; // Set your desired password here
         const CORE_AGENTS = [
             "Amir Daniel", "Amr Ibrahim", "Rawan Essam", "Noura Aly", "Youssef Abdelshafy"
         ];
 
-        // --- LAYER 4: AI PROMPT ARCHITECTURE ---
+        // --- LAYER 4: AI PROMPT ARCHITECTURE (UPDATED FOR SALES) ---
         const AI_PROMPTS = {
-            system: `You are a Principal QA Analyst for Lenovo Support. Your goal is to evaluate customer service chat logs against a specific scorecard.
-You must be objective, identifying both specific failures and good behaviors.
-You prioritize:
-1. Active Listening (Did the agent actually answer the customer's specific question?)
-2. Process Adherence (Did they verify SN, ask for permission, etc?)
-3. Solution Accuracy (Did they provide the correct link/steps?)
-4. Tone (Was it professional yet empathetic?)
+            system: `You are a Principal QA Analyst for Lenovo Sales & Support. Your goal is to evaluate customer service chat logs against a specific scorecard.
+CONTEXT:
+- Agents are handling Sales inquiries (Laptops: ThinkPad, Legion, Yoga) and Support.
+- High performance requires strong Discovery (understanding needs) and Closing (asking for the sale).
 
-You will be provided with:
-1. A Scorecard Definition (Criteria)
-2. A Chat Transcript (annotated with phases)
-3. Computed Risk Flags
+You must be objective. You prioritize:
+1. Active Listening (Did the agent actually answer the specific question?)
+2. Solution/Sales Accuracy (Did they recommend the right product/specs? Did they quote correctly?)
+3. Process Adherence (Did they verify details, ask for the sale?)
+4. Tone (Was it professional, confident, and empathetic?)
+
+CRITICAL FAILURE RULES (STRICT - Follow These Exactly):
+- CX Critical: Rudeness, Sarcasm, Hanging up on an active customer (Chat Dumping), Ignoring explicit questions repeatedly.
+- Compliance Critical: Asking for Credit Card numbers (PCI Violation), Asking for Passwords.
+- Business Critical: Quoting unauthorized discounts, Misrepresenting product specs.
+IMPORTANT: Asking for a Survey/CSAT/Feedback is a POSITIVE requirement. Never mark CSAT requests as a critical failure.
 
 Output Format: JSON only. No markdown.
 Structure:
 {
-  "summary": "2-sentence summary of the interaction.",
+  "summary": "2-sentence summary of the interaction, noting if a sale was made or a solution provided.",
   "sentiment_trajectory": "Positive -> Neutral -> Negative",
   "criteria_scores": {
-    "greet": "Yes/No/NA",
+    "greet": "Yes/No/N/A", // Changed NA to N/A
     "discovery": "Yes/No/NA",
     // ... maps to scorecard IDs
   },
   "reasoning": {
     "greet": "Agent said 'Hello'",
-    "discovery": "Agent asked about the OS version and error message.",
+    "discovery": "Agent asked about budget and preferred screen size.",
     // ... brief evidence for each score
   },
   "critical_fail": "None" or "CX Critical" or "Compliance Critical",
-  "critical_reason": "Explanation if critical fail",
-  "coaching_tip": "Specific actionable feedback for the agent."
+  "critical_reason": "Explanation if critical fail (quote the exact text)",
+  "coaching_tip": "Specific actionable feedback for the agent (e.g., 'Ask for the sale earlier')."
 }`,
+         
             userTemplate: (chat, scorecard) => `
 CHAT CONTEXT:
 Agent: ${chat.agent}
@@ -158,7 +163,7 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
 `
         };
 
-        // --- WORKER CODE (Embedded - Layer 2 Implemented + Tuned) ---
+        // --- WORKER CODE (Embedded - "SUPER SMART" OFFLINE ENGINE + EXPIRY CHECK) ---
         const WORKER_CODE = `
         importScripts('https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js');
 
@@ -166,99 +171,166 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
             "Amir Daniel", "Amr Ibrahim", "Rawan Essam", "Noura Aly", "Youssef Abdelshafy"
         ];
         
-        const NEGATIVE_KEYWORDS = ['upset', 'angry', 'complaint', 'manager', 'fail', 'broken', 'slow', 'bad', 'wrong', 'ridiculous', 'waiting', 'waste', 'cancel', 'terrible', 'useless'];
+        // 1. SMART DICTIONARIES
+        const SENTIMENT_DICT = {
+            negative: {
+                high: ['angry', 'upset', 'ridiculous', 'useless', 'manager', 'sue', 'lawyer', 'complaint', 'fail', 'waste', 'broken', 'worst', 'liar'],
+                medium: ['slow', 'waiting', 'wrong', 'cancel', 'disappointed', 'hard', 'difficult', 'confusing']
+            },
+            positive: {
+                high: ['perfect', 'amazing', 'great', 'love', 'excellent', 'star', 'best'],
+                medium: ['thanks', 'thank', 'helpful', 'appreciate', 'good', 'clear', 'solved', 'working']
+            }
+        };
 
-        // --- LAYER 1: DETERMINISTIC LOGIC (TUNED) ---
-        const INTENT_PATTERNS = {
-            greeting: ['hello', 'hi', 'morning', 'afternoon', 'evening', 'welcome', 'assist'],
-            closing: ['thank', 'bye', 'goodbye', 'help you with', 'anything else', 'wonderful day'],
-            question: ['?', 'what', 'how', 'when', 'why', 'where', 'may i', 'can i', 'could you'],
-            problem: ['not working', 'broken', 'issue', 'problem', 'fail', 'error', 'damage', 'slow', 'blue screen', 'boot', 'charge'],
-            instruction: ['click', 'link', 'visit', 'go to', 'steps', 'setting', 'select', 'press', 'type', 'enter'],
-            warranty: ['warranty', 'repair', 'onsite', 'depot', 'coverage', 'entitlement'],
-            empathy: ['sorry', 'apologize', 'understand', 'regret', 'frustrating'],
-            confirmation: ['yes', 'correct', 'ok', 'okay', 'sure', 'right', 'will do'],
-            data: ['serial', 'sn', 'email', 'phone', 'address', 'model', 'number']
+        const SALES_TRIGGERS = {
+            inquiry: ['price', 'cost', 'much', 'quote', 'specs', 'difference', 'better', 'recommend'],
+            objection: ['expensive', 'cheaper', 'competitor', 'think about it', 'budget'],
+            closing: ['buy', 'purchase', 'order', 'cart', 'card', 'payment', 'link', 'send me']
+        };
+
+        // 2. ADVANCED PATTERN MATCHING
+        const INTENT_REGEX = {
+            greeting: /\\b(hi|hello|morning|afternoon|welcome|assist)\\b/i,
+            closing: /\\b(thank|bye|goodbye|help you with|anything else|wonderful day)\\b/i,
+            question: /\\?|\\b(what|how|when|why|where|can i|could you)\\b/i,
+            problem: /\\b(not working|broken|issue|error|damage|slow|fail|blue screen|boot|charge)\\b/i,
+            instruction: /\\b(click|link|visit|go to|steps|setting|select|press|type)\\b/i,
+            warranty: /\\b(warranty|repair|onsite|depot|coverage|entitlement)\\b/i,
+            sales_pitch: /\\b(features|benefits|design|performance|powerful|exclusive|offer|deal)\\b/i,
+            sales_close: /\\b(secure this|proceed|ready to|cart|checkout|order now)\\b/i,
+            empathy: /\\b(sorry|apologize|understand|regret|frustrating|bear with me)\\b/i,
+            confirmation: /\\b(yes|correct|ok|sure|right|will do|absolutely)\\b/i
         };
 
         const detectIntent = (text) => {
-            const lower = text.toLowerCase();
-            for (const [intent, keywords] of Object.entries(INTENT_PATTERNS)) {
-                if (intent === 'question' && lower.includes('?')) return 'Question';
-                if (keywords.some(k => lower.includes(k))) return intent.charAt(0).toUpperCase() + intent.slice(1);
+            for (const [intent, regex] of Object.entries(INTENT_REGEX)) {
+                if (regex.test(text)) return intent.charAt(0).toUpperCase() + intent.slice(1);
             }
             return 'Statement';
         };
 
+        const calculateSentimentScore = (text) => {
+            let score = 0;
+            const lower = text.toLowerCase();
+            SENTIMENT_DICT.negative.high.forEach(w => { if(lower.includes(w)) score -= 3; });
+            SENTIMENT_DICT.negative.medium.forEach(w => { if(lower.includes(w)) score -= 1; });
+            SENTIMENT_DICT.positive.high.forEach(w => { if(lower.includes(w)) score += 3; });
+            SENTIMENT_DICT.positive.medium.forEach(w => { if(lower.includes(w)) score += 1; });
+            return score;
+        };
+
         const segmentPhases = (messages) => {
             let phase = 'Opening';
+            let salesState = 'None'; 
             const segmented = [];
-            
-            const closingIndices = new Set();
-            for (let i = messages.length - 1; i >= 0; i--) {
-                const intent = detectIntent(messages[i].text);
-                if (intent === 'Closing' || (i > messages.length - 4)) {
-                    closingIndices.add(i);
-                } else {
-                    break; 
-                }
-            }
+            const closingCutoff = Math.max(messages.length - 3, Math.floor(messages.length * 0.9));
 
             for (let i = 0; i < messages.length; i++) {
                 const msg = messages[i];
                 const intent = detectIntent(msg.text);
+                const isAgent = msg.type === 'agent';
                 
-                if (closingIndices.has(i)) {
+                if (i >= closingCutoff || intent === 'Closing') {
                     phase = 'Closing';
                 } else if (phase === 'Opening') {
-                    if (intent === 'Problem' || intent === 'Data' || (intent === 'Question' && i > 1) || i > 4) {
+                    if (intent === 'Problem' || intent === 'Question' || (intent === 'Instruction' && i > 2)) {
                         phase = 'Discovery';
                     }
                 } else if (phase === 'Discovery') {
-                    if (msg.type === 'agent' && (intent === 'Warranty' || (intent === 'Instruction' && msg.text.length > 100))) {
+                    if (intent === 'Sales_pitch' || intent === 'Instruction' || intent === 'Warranty') {
                         phase = 'Resolution';
                     }
                 }
-                segmented.push({ ...msg, intent, phase });
+
+                const lower = msg.text.toLowerCase();
+                if (SALES_TRIGGERS.inquiry.some(w => lower.includes(w))) salesState = 'Discovery';
+                if (isAgent && INTENT_REGEX.sales_pitch.test(msg.text)) salesState = 'Pitch';
+                if (isAgent && INTENT_REGEX.sales_close.test(msg.text)) salesState = 'Closing';
+
+                segmented.push({ ...msg, intent, phase, salesState });
             }
             return segmented;
         };
 
-        // --- LAYER 2: FLOW & BEHAVIOR ANALYSIS (TUNED) ---
-        const analyzeFlow = (messages) => {
+        // 4. "SUPER SMART" ANALYZER
+        const analyzeDeeply = (messages) => {
             let score = 100;
             const flags = {
-                skippedDiscovery: false,
-                poorProbing: false,
-                rushedClosing: false,
-                escalation: false
+                sentimentDrop: false,
+                sentimentLift: false,
+                longWait: false,
+                deadAir: false,
+                robotic: false,
+                missedSalesOpp: false,
+                rushed: false,
+                expired: false // NEW FLAG
             };
 
-            const phases = new Set(messages.map(m => m.phase));
-            const agentDiscoveryMsgs = messages.filter(m => m.phase === 'Discovery' && m.type === 'agent');
-            const discoveryQuestions = agentDiscoveryMsgs.filter(m => m.intent === 'Question' || m.text.includes('?'));
+            if (messages.length < 2) return { score: 0, flags };
 
-            if (messages.length > 10 && (!phases.has('Discovery') || agentDiscoveryMsgs.length < 1)) {
-                score -= 20;
-                flags.skippedDiscovery = true;
-            } else if (messages.length > 10 && discoveryQuestions.length < 2) {
+            // A. Timing Analysis
+            let maxGap = 0;
+            let totalAgentResponseTime = 0;
+            let agentResponses = 0;
+            
+            for (let i = 0; i < messages.length - 1; i++) {
+                const curr = messages[i];
+                const next = messages[i+1];
+                const t1 = new Date(curr.time).getTime();
+                const t2 = new Date(next.time).getTime();
+                const gapMin = (t2 - t1) / 1000 / 60;
+
+                if (gapMin > maxGap) maxGap = gapMin;
+                if (curr.type === 'customer' && next.type === 'agent') {
+                    totalAgentResponseTime += gapMin;
+                    agentResponses++;
+                }
+            }
+            
+            const avgART = agentResponses > 0 ? (totalAgentResponseTime / agentResponses) : 0;
+            if (maxGap > 5) flags.deadAir = true; 
+            if (avgART > 2) flags.longWait = true;
+
+            // B. Sentiment Velocity
+            const firstHalf = messages.slice(0, Math.floor(messages.length / 2));
+            const secondHalf = messages.slice(Math.floor(messages.length / 2));
+            const startScore = firstHalf.reduce((acc, m) => acc + calculateSentimentScore(m.text), 0);
+            const endScore = secondHalf.reduce((acc, m) => acc + calculateSentimentScore(m.text), 0);
+
+            if (startScore > 0 && endScore < -2) flags.sentimentDrop = true;
+            if (startScore < 0 && endScore > 2) flags.sentimentLift = true;
+
+            // C. Sales Logic
+            const customerAsksPrice = messages.some(m => m.type === 'customer' && SALES_TRIGGERS.inquiry.some(w => m.text.toLowerCase().includes(w)));
+            const agentQuotes = messages.some(m => m.type === 'agent' && (INTENT_REGEX.sales_pitch.test(m.text) || m.text.includes('$') || m.text.toLowerCase().includes('price')));
+            
+            if (customerAsksPrice && !agentQuotes) {
+                flags.missedSalesOpp = true;
+                score -= 15;
+            }
+
+            // D. Robotic Check
+            const agentTexts = messages.filter(m => m.type === 'agent').map(m => m.text);
+            const uniqueTexts = new Set(agentTexts);
+            if (agentTexts.length > 5 && uniqueTexts.size < agentTexts.length * 0.7) {
+                flags.robotic = true;
                 score -= 10;
-                flags.poorProbing = true;
             }
 
-            if (!phases.has('Closing')) {
-                score -= 10;
-                flags.rushedClosing = true;
+            // E. EXPIRY DETECTION (NEW)
+            // Checks for "Expired due to chat expiry", "expired", or "expiry"
+            if (messages.some(m => /expired|expiry|600 sec/i.test(m.text))) {
+                flags.expired = true;
+                score -= 20; // Penalty for allowing chat to expire
             }
 
-            const escalationKeywords = ['manager', 'supervisor', 'escalate', 'complaint', 'lawyer', 'sue'];
-            const customerMsgs = messages.filter(m => m.type === 'customer');
-            if (customerMsgs.some(m => escalationKeywords.some(k => m.text.toLowerCase().includes(k)))) {
-                score -= 20;
-                flags.escalation = true;
-            }
-
-            return { score: Math.max(0, score), flags };
+            // Scoring Penalties
+            if (flags.deadAir) score -= 10;
+            if (flags.sentimentDrop) score -= 20;
+            if (flags.robotic) score -= 10;
+            
+            return { score: Math.max(0, score), flags, stats: { avgART: avgART.toFixed(1), maxGap: maxGap.toFixed(1) } };
         };
 
         const parseDate = (dateStr) => {
@@ -267,11 +339,14 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
             const parts = cleanStr.split(/[\\/\\-\\s:TZ]/).filter(p => p !== ""); 
             if (parts.length >= 3) {
                 let day, month, year, hours=0, minutes=0, seconds=0;
-                if (parts[2].length === 4) { day = parseInt(parts[0], 10); month = parseInt(parts[1], 10) - 1; year = parseInt(parts[2], 10); if (parts.length >= 4) hours = parseInt(parts[3], 10); if (parts.length >= 5) minutes = parseInt(parts[4], 10); if (parts.length >= 6) seconds = parseInt(parts[5], 10); return new Date(year, month, day, hours, minutes, seconds); }
-                if (parts[0].length === 4) { year = parseInt(parts[0], 10); month = parseInt(parts[1], 10) - 1; day = parseInt(parts[2], 10); if (parts.length >= 4) hours = parseInt(parts[3], 10); if (parts.length >= 5) minutes = parseInt(parts[4], 10); if (parts.length >= 6) seconds = parseInt(parts[5], 10); return new Date(year, month, day, hours, minutes, seconds); }
+                if (parts[0].length === 4) { year = parseInt(parts[0], 10); month = parseInt(parts[1], 10) - 1; day = parseInt(parts[2], 10); }
+                else { day = parseInt(parts[0], 10); month = parseInt(parts[1], 10) - 1; year = parseInt(parts[2], 10); }
+                if (parts.length >= 4) hours = parseInt(parts[3], 10);
+                if (parts.length >= 5) minutes = parseInt(parts[4], 10);
+                if (parts.length >= 6) seconds = parseInt(parts[5], 10);
+                return new Date(year, month, day, hours, minutes, seconds);
             }
-            const d = new Date(dateStr);
-            return isNaN(d.getTime()) ? new Date(0) : d;
+            return new Date(dateStr);
         };
 
         self.onmessage = async (e) => {
@@ -286,7 +361,9 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                         const result = Papa.parse(text, { header: true, skipEmptyLines: true });
                         combinedRows = combinedRows.concat(result.data);
                     }
-                    self.postMessage({ type: 'PROGRESS', value: 25, message: \`Grouping \${combinedRows.length} rows...\` });
+                    
+                    self.postMessage({ type: 'PROGRESS', value: 30, message: \`Structuring \${combinedRows.length} messages...\` });
+
                     const groups = {};
                     combinedRows.forEach(row => {
                         const id = row.chatid || row['Chat ID'] || row.ConversationID;
@@ -294,80 +371,58 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                         if (!groups[id]) groups[id] = [];
                         groups[id].push(row);
                     });
+
                     const groupEntries = Object.entries(groups);
                     const totalChats = groupEntries.length;
                     const processedChats = [];
 
                     for (let i = 0; i < totalChats; i++) {
-                        const [id, messages] = groupEntries[i];
-                        messages.sort((a, b) => new Date(a.date) - new Date(b.date));
+                        const [id, rawMessages] = groupEntries[i];
+                        rawMessages.sort((a, b) => parseDate(a.date) - parseDate(b.date));
+
                         let agentName = "Unknown";
-                        let date = parseDate(messages[0]?.date);
-                        const formattedMsgs = [];
-                        const systemMsg = messages.find(m => (m.from === 'System' || m.text.includes('System:')) && (m.text.includes('Proactive chat started by') || m.text.includes('Ended by') || m.text.includes('Assigned to')));
-                        if (systemMsg) {
-                            const text = systemMsg.text;
-                            const foundCore = CORE_AGENTS.find(a => text.includes(a));
-                            if (foundCore) agentName = foundCore;
-                            else { const match = text.match(/by\\s+([A-Za-z\\s]+)/); if (match && match[1]) agentName = match[1].trim(); }
+                        const date = parseDate(rawMessages[0]?.date);
+                        
+                        const coreSender = rawMessages.find(m => CORE_AGENTS.includes(m.from));
+                        if (coreSender) agentName = coreSender.from;
+                        else {
+                             const nonSystem = rawMessages.find(m => !['System', 'Bot', 'Lenovo Bot', 'Visitor', 'Customer'].includes(m.from));
+                             if(nonSystem) agentName = nonSystem.from;
                         }
-                        if (agentName === "Unknown") {
-                            const coreSender = messages.find(m => CORE_AGENTS.includes(m.from));
-                            if (coreSender) agentName = coreSender.from;
-                        }
-                        messages.forEach(m => {
-                            formattedMsgs.push({
-                                sender: m.from,
-                                text: m.text,
-                                time: m.date,
-                                type: CORE_AGENTS.includes(m.from) || m.from === agentName ? 'agent' : ['System', 'Bot', 'Lenovo Bot'].includes(m.from) ? 'system' : 'customer'
-                            });
-                        });
+
+                        const formattedMsgs = rawMessages.map(m => ({
+                            sender: m.from,
+                            text: m.text || "",
+                            time: m.date,
+                            type: (CORE_AGENTS.includes(m.from) || m.from === agentName) ? 'agent' : 
+                                  (['System', 'Bot', 'Lenovo Bot'].includes(m.from) ? 'system' : 'customer')
+                        }));
 
                         const enrichedMsgs = segmentPhases(formattedMsgs);
-                        const flowAnalysis = analyzeFlow(enrichedMsgs);
+                        const analysis = analyzeDeeply(enrichedMsgs);
 
-                        const msgs = enrichedMsgs; 
-                        let sentimentDrop = false;
-                        let longDuration = false;
-                        let silence = false;
-                        let expired = false;
-                        if (msgs.length > 1) {
-                            const startTime = parseDate(msgs[0].time).getTime();
-                            const endTime = parseDate(msgs[msgs.length - 1].time).getTime();
-                            const durationMinutes = (endTime - startTime) / 1000 / 60;
-                            if (durationMinutes > 45) longDuration = true;
-                            for (let j = 0; j < msgs.length - 1; j++) {
-                                const t1 = parseDate(msgs[j].time).getTime();
-                                const t2 = parseDate(msgs[j+1].time).getTime();
-                                const gapMin = (t2 - t1) / 1000 / 60;
-                                if (gapMin > 30) expired = true;
-                                if (msgs[j].type === 'customer' && msgs[j+1].type === 'agent') { if (gapMin > 5) silence = true; }
-                            }
-                            const cutOff = Math.floor(msgs.length * 0.8);
-                            const lastPart = msgs.slice(cutOff);
-                            const customerLastPart = lastPart.filter(m => m.type === 'customer');
-                            sentimentDrop = customerLastPart.some(m => NEGATIVE_KEYWORDS.some(k => m.text.toLowerCase().includes(k)));
-                        }
                         let riskScore = 0;
-                        if (sentimentDrop) riskScore += 30;
-                        if (expired) riskScore += 20;
-                        if (silence) riskScore += 10;
-                        if (longDuration) riskScore += 5;
+                        if (analysis.flags.sentimentDrop) riskScore += 40;
+                        if (analysis.flags.missedSalesOpp) riskScore += 30;
+                        if (analysis.flags.robotic) riskScore += 20;
+                        if (analysis.flags.deadAir) riskScore += 15;
+                        if (analysis.flags.expired) riskScore += 50; // High risk for expiry
 
                         processedChats.push({
                             id,
                             agent: agentName,
                             date: date, 
                             messages: enrichedMsgs, 
-                            dateStr: messages[0]?.date,
+                            dateStr: rawMessages[0]?.date,
                             riskScore,
-                            flags: { sentimentDrop, longDuration, silence, expired },
-                            flowScore: flowAnalysis.score,
-                            flowFlags: flowAnalysis.flags
+                            flags: analysis.flags,
+                            flowScore: analysis.score,
+                            stats: analysis.stats
                         });
 
-                        if (i % 200 === 0) { self.postMessage({ type: 'PROGRESS', value: 25 + Math.round((i / totalChats) * 75), message: 'Processing Flow & Risks...' }); }
+                        if (i % 100 === 0) { 
+                            self.postMessage({ type: 'PROGRESS', value: 30 + Math.round((i / totalChats) * 70), message: \`Analyzing Intelligence (\${i}/\${totalChats})...\` }); 
+                        }
                     }
                     self.postMessage({ type: 'COMPLETE', data: processedChats });
                 } catch (err) { self.postMessage({ type: 'ERROR', message: err.message }); }
@@ -375,7 +430,7 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
         };
         `;
 
-        // Centralized Keywords
+        // Centralized Keywords (EXPANDED FOR SALES)
         const KEYWORDS = {
             greetings: [
                 'hello', 'hi', 'welcome', 'good morning', 'good afternoon', 'good evening', 
@@ -386,18 +441,31 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                 'sorry', 'apologize', 'understand', 'regret', 'unfortunate', 'frustrating', 
                 'bear with me', 'my apologies', 'sorry for the inconvenience', 'i assure you',
                 'totally understand', 'hear that', 'must be difficult', 'resolve this', 
-                'on the same page', 'make this right', 'trouble you are facing'
+                'on the same page', 'make this right', 'trouble you are facing', 'i realize'
             ],
             hold: [
                 'hold', 'moment', 'check', 'bear with me', 'allow me to check', 'look into this', 
                 'researching', 'brief hold', 'few minutes', 'consult', 'pull up', 'accessing', 
-                'give me a second', 'quick check', 'grabbing that info'
+                'give me a second', 'quick check', 'grabbing that info', 'double check'
             ],
             warranty: [
                 'warranty', 'care', 'support', 'accessory', 'guarantee', 'repair', 'depot', 
                 'onsite', 'accidental', 'damage', 'protection', 'sealed battery', 'keep your drive', 
                 'adp', 'premier', 'upgrade warranty', 'warranty status', 'entitlement', 
-                'base warranty', 'smart performance'
+                'base warranty', 'smart performance', 'extended'
+            ],
+            // NEW: Sales Specific Products & Terms
+            products: [
+                'thinkpad', 'legion', 'yoga', 'ideapad', 'thinkbook', 'loq', 'monitor', 'dock', 
+                'workstation', 'p series', 'x1 carbon', 't series', 'gaming', 'specs', 'specification',
+                'ram', 'ssd', 'processor', 'intel', 'amd', 'ryzen', 'nvidia', 'rtx', 'graphics',
+                'screen', 'display', 'oled', 'ips', 'battery life', 'weight'
+            ],
+            // NEW: Pricing & Closing Terms
+            sales: [
+                'price', 'quote', 'cost', 'discount', 'offer', 'deal', 'cart', 'buy', 'purchase',
+                'order', 'checkout', 'finance', 'save', 'promotion', 'coupon', 'code', 'total',
+                'tax', 'shipping', 'delivery', 'stock', 'available', 'ready to ship'
             ],
             accessories: [
                 'mouse', 'keyboard', 'monitor', 'dock', 'charger', 'adapter', 'headset', 'bag', 
@@ -406,28 +474,36 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
             ],
             closing: [
                 'anything else', 'further', 'assist you', 'other questions', 'help you with',
-                'additional questions', 'support you', 'else i can do'
+                'additional questions', 'support you', 'else i can do', 'proceed with', 
+                'ready to', 'secure this'
             ],
             profClosing: [
                 'thank', 'bye', 'wonderful day', 'great day', 'rest of your day', 'take care', 
-                'goodbye', 'appreciate your business', 'thanks for choosing'
+                'goodbye', 'appreciate your business', 'thanks for choosing', 'thanks for shopping'
             ],
             csat: [
                 'survey', 'feedback', 'short survey', 'rate', 'experience', 'email', 
-                'satisfaction', 'how i did', 'valued feedback'
+                'satisfaction', 'how i did', 'valued feedback', 'fill out'
             ],
             discovery: [
                 '?', 'what', 'how', 'need', 'looking for', 'intend to use', 'purpose', 
                 'usage', 'budget', 'preference', 'screen size', 'processor', 'storage', 
-                'primary use', 'work', 'school', 'gaming'
+                'primary use', 'work', 'school', 'gaming', 'editing', 'business', 'student',
+                'heavy', 'light', 'travel', 'desktop'
+            ],
+            // NEW: Objection Handling / reassurance
+            objection: [
+                'compare', 'difference', 'better', 'value', 'benefit', 'reason', 'why',
+                'advantage', 'competitor', 'cheaper', 'expensive', 'investment', 'quality',
+                'review', 'performance', 'durable', 'reliable'
             ],
             cxCritical: [
                 'shut up', 'idiot', 'stupid', 'dumb', 'hate you', 'don\'t care', 'whatever', 
-                'ridiculous', 'liar', 'waste of time'
+                'ridiculous', 'liar', 'waste of time', 'bullshit', 'damn'
             ],
             compCritical: [
                 'credit card', 'cvv', 'card number', 'expiry', 'social security', 'ssn', 
-                'password', 'login credentials'
+                'password', 'login credentials', 'pwd'
             ]
         };
 
@@ -493,10 +569,40 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
 
         // --- UTILS ---
 
-        const Icon = ({ name, size = 18, className = "" }) => {
-            useEffect(() => lucide.createIcons(), [name]);
-            return <i data-lucide={name} width={size} height={size} className={className}></i>;
-        };
+const Icon = ({ name, size = 18, className = "" }) => {
+    const ref = useRef(null);
+
+    useEffect(() => {
+        if (ref.current) {
+            // 1. Clear the container
+            ref.current.innerHTML = '';
+            
+            // 2. Create the element Lucide expects
+            const i = document.createElement('i');
+            i.setAttribute('data-lucide', name);
+            i.setAttribute('width', size);
+            i.setAttribute('height', size);
+            
+            // 3. Add classes manually to ensure they persist
+            if (className) {
+                // Handle Tailwind classes correctly
+                i.setAttribute('class', className);
+            }
+
+            // 4. Append to our safe container
+            ref.current.appendChild(i);
+
+            // 5. Tell Lucide to process ONLY this container
+            lucide.createIcons({
+                root: ref.current,
+                nameAttr: 'data-lucide'
+            });
+        }
+    }, [name, size, className]);
+
+    // React controls this span, Lucide messes with what's inside it. Safe.
+    return <span ref={ref} className="inline-flex items-center justify-center"></span>;
+};
 
         const parseDate = (dateStr) => {
             if (!dateStr || typeof dateStr !== 'string') return new Date(0);
@@ -1126,13 +1232,19 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                     let response;
                     if (useProxy) {
                          // PROXY PATH
-                         response = await fetch(proxyUrl, {
-                                 method: 'POST',
-                                 mode: 'cors',
-                                 credentials: 'omit', // Crucial for local files
-                                 headers: { 'Content-Type': 'application/json' },
-                                 body: JSON.stringify({ userPrompt: user, systemPrompt: system, model: modelToUse })
-                         });
+                        response = await fetch(proxyUrl, {
+                                method: 'POST',
+                                mode: 'cors',
+                                credentials: 'omit', // Crucial for local files
+                                headers: { 'Content-Type': 'application/json' },
+                                // UPDATED: We now send the apiKey to the worker
+                                body: JSON.stringify({ 
+                                    userPrompt: user, 
+                                    systemPrompt: system, 
+                                    model: modelToUse, 
+                                    apiKey: apiKey 
+                                })
+                        });
                     } else {
                         // DIRECT GOOGLE PATH
                         response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${modelToUse}:generateContent?key=${apiKey}`, {
@@ -1148,7 +1260,21 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                     }
                     
                     const data = await response.json();
-                    if (!data.candidates || !data.candidates.length) throw new Error("No content returned");
+                    
+                    // DEBUG: Log the actual response to the console
+                    console.log("[AI Raw Response]:", data);
+
+                    if (!data.candidates || !data.candidates.length) {
+                        // Handle Safety Blocks specifically
+                        if (data.promptFeedback) {
+                             throw new Error(`Google Blocked Content: ${JSON.stringify(data.promptFeedback)}`);
+                        }
+                        // Handle API Errors
+                        if (data.error) {
+                             throw new Error(`Google API Error: ${data.error.message}`);
+                        }
+                        throw new Error("No content returned (Response was empty)");
+                    }
 
                     const text = data.candidates[0].content.parts[0].text;
                     const jsonResult = JSON.parse(text);
@@ -1192,12 +1318,34 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
 
             // Helper to save results (Shared by Real & Sim)
             const applyAnalysisResult = (chatId, jsonResult, status) => {
-                const newScore = calculateScore(jsonResult.criteria_scores, jsonResult.critical_fail);
+                
+                // 1. NORMALIZE AI OUTPUT (Fixes the "Empty Button" / "NA" issue)
+                const safeCriteria = {};
+                if (jsonResult.criteria_scores) {
+                    Object.entries(jsonResult.criteria_scores).forEach(([key, val]) => {
+                        let normalized = val;
+                        if (typeof val === 'string') {
+                            const upper = val.toUpperCase().trim();
+                            // Convert variants like "NA", "na", "N/A" -> "N/A"
+                            if (upper === 'NA' || upper === 'N/A' || upper === 'NOT APPLICABLE') {
+                                normalized = 'N/A';
+                            } 
+                            // Ensure "Yes" and "No" have correct casing
+                            else if (upper === 'YES') normalized = 'Yes';
+                            else if (upper === 'NO') normalized = 'No';
+                        }
+                        safeCriteria[key] = normalized;
+                    });
+                }
+
+                // 2. Calculate score using the CLEANED criteria
+                const newScore = calculateScore(safeCriteria, jsonResult.critical_fail);
+                
                 setQaData(prev => ({
                     ...prev,
                     [chatId]: {
                         ...prev[chatId],
-                        criteria: jsonResult.criteria_scores,
+                        criteria: safeCriteria, // Save the normalized version
                         score: newScore,
                         criticalFail: jsonResult.critical_fail,
                         criticalReason: jsonResult.critical_reason,
@@ -1613,7 +1761,7 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                                     placeholder="Enter your API Key"
                                 />
                                 <p className="text-[10px] text-slate-500 mt-2">
-                                    Your key is stored locally in your browser.
+                                    You can get Your key from https://aistudio.google.com .
                                 </p>
                             </div>
                             
@@ -1653,10 +1801,10 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                                             className="w-full bg-slate-800 border border-slate-700 text-white rounded p-2 focus:ring-2 focus:ring-lenovo-red outline-none"
                                         >
                                             <option value="gemini-flash-latest">Gemini-flash-latest (Recommended)</option>
-                                            <option value="gemini-1.5-flash-001">Gemini 1.5 Flash (001)</option>
-                                            <option value="gemini-1.5-flash-002">Gemini 1.5 Flash (002)</option>
-                                            <option value="gemini-1.5-pro">Gemini 1.5 Pro</option>
-                                            <option value="gemini-pro">Gemini 1.0 Pro (Legacy/Fallback)</option>
+                                            <option value="gemini-2.0-pro">Gemini 2 PRO </option>
+                                            <option value="gemini-2.0-flash">Gemini 2 Flash</option>
+                                            <option value="gemini-2.0-flash-lite">Gemini 2 Flash lite</option>
+                                            <option value="gemini-3-flash">gemini-3-flash</option>
                                         </select>
                                     ) : (
                                         <input 
@@ -1664,7 +1812,7 @@ ${chat.messages.map(m => `[${m.time}] [${m.phase}] ${m.sender}: ${m.text}`).join
                                             value={customModelName} 
                                             onChange={(e) => setCustomModelName(e.target.value)} 
                                             className="w-full bg-slate-800 border border-slate-700 text-white rounded p-2 focus:ring-2 focus:ring-lenovo-red outline-none"
-                                            placeholder="e.g. gemini-1.5-flash"
+                                            placeholder="e.g. gemini-3-flash"
                                         />
                                     )}
                                 </div>
